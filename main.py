@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import asyncio
 from io import BytesIO
 
 import pdfplumber
@@ -41,17 +40,8 @@ def parse_pdf(file_bytes: bytes):
 
     try:
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-
-            # защита от пустых/битых pdf
-            if not pdf.pages:
-                return []
-
             for page in pdf.pages:
-                try:
-                    text = page.extract_text()
-                except Exception:
-                    continue
-
+                text = page.extract_text()
                 if not text:
                     continue
 
@@ -61,25 +51,22 @@ def parse_pdf(file_bytes: bytes):
                         rows.append([line])
 
     except PDFSyntaxError:
-        logging.error("Invalid PDF file (PDFSyntaxError)")
+        logging.error("Invalid PDF")
         return []
     except Exception as e:
-        logging.error(f"PDF parse error: {e}")
+        logging.error(f"PDF error: {e}")
         return []
 
     return rows
 
 
-# ---------------- SHEETS PUSH (FAST VERSION) ----------------
+# ---------------- SHEETS ----------------
 def push(rows):
     try:
         sheet = get_sheet()
-
-        # быстрее чем append_rows для больших данных
         sheet.append_rows(rows, value_input_option="RAW")
-
     except Exception as e:
-        logging.error(f"Google Sheets error: {e}")
+        logging.error(f"Sheets error: {e}")
 
 
 # ---------------- HANDLER ----------------
@@ -93,32 +80,32 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Processing...")
 
     file = await context.bot.get_file(doc.file_id)
-    file_bytes = await file.download_as_bytearray()
-    file_bytes = bytes(file_bytes)
+    file_bytes = bytes(await file.download_as_bytearray())
 
-    # ---- FILTER ----
     if not file_name.endswith(".pdf"):
-        await update.message.reply_text("❌ Only PDF supported right now")
+        await update.message.reply_text("Only PDF allowed")
         return
 
     rows = parse_pdf(file_bytes)
 
     if not rows:
-        await update.message.reply_text("❌ No readable text in PDF (or file is invalid)")
+        await update.message.reply_text("No data in file")
         return
 
     push(rows)
 
-    await update.message.reply_text(f"✅ Done: {len(rows)} rows added")
+    await update.message.reply_text(f"Done: {len(rows)} rows")
 
 
-# ---------------- MAIN ----------------
+# ---------------- MAIN (FIXED) ----------------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.Document.ALL, handle))
 
     print("Bot started")
+
+    # ❗ ЭТО ГЛАВНЫЙ FIX
     app.run_polling()
 
 
