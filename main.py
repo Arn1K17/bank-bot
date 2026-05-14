@@ -365,13 +365,19 @@ def push_to_sheets(rows):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
+
     if not doc:
-        await update.message.reply_text("Пожалуйста, отправьте файл выписки (.xlsx или .pdf)")
+        await update.message.reply_text(
+            "Пожалуйста, отправьте файл выписки (.xlsx или .pdf)"
+        )
         return
 
     fname = (doc.file_name or "").lower()
+
     if not (fname.endswith(".xlsx") or fname.endswith(".pdf")):
-        await update.message.reply_text("Поддерживаются только файлы .xlsx и .pdf")
+        await update.message.reply_text(
+            "Поддерживаются только файлы .xlsx и .pdf"
+        )
         return
 
     await update.message.reply_text("⏳ Обрабатываю выписку...")
@@ -380,32 +386,107 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(doc.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
 
+        # XLSX
         if fname.endswith(".xlsx"):
             rows = process_kaspi_xlsx(file_bytes)
+
+        # PDF
         else:
             bank = detect_pdf_bank(file_bytes)
-            logger.info(f"Detected bank: {bank} for file: {fname}")
+
+            logger.info(
+                f"Detected bank: {bank} for file: {fname}"
+            )
+
+            # KASPI GOLD
             if bank == "kaspi_gold":
+
                 rows = process_kaspi_gold_pdf(file_bytes)
+
+            # BCC ДИАГНОСТИКА
             elif bank == "bcc":
-                rows = process_bcc_pdf(file_bytes)
+
+                with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+
+                    for i, page in enumerate(pdf.pages[:2]):
+
+                        tables = page.extract_tables()
+
+                        debug_msg = (
+                            f"Страница {i+1}: "
+                            f"таблиц={len(tables)}\n"
+                        )
+
+                        for j, table in enumerate(tables):
+
+                            debug_msg += (
+                                f"\nТаблица {j+1}:\n"
+                            )
+
+                            debug_msg += (
+                                f"Строк: {len(table)}\n"
+                            )
+
+                            if table and len(table) > 0:
+
+                                debug_msg += (
+                                    f"Колонок: "
+                                    f"{len(table[0])}\n"
+                                )
+
+                                debug_msg += (
+                                    f"Первая строка:\n"
+                                    f"{table[0]}\n"
+                                )
+
+                            if table and len(table) > 1:
+
+                                debug_msg += (
+                                    f"\nВторая строка:\n"
+                                    f"{table[1]}\n"
+                                )
+
+                        await update.message.reply_text(
+                            debug_msg[:4000]
+                        )
+
+                rows = []
+
+            # UNKNOWN PDF
             else:
-                # Пробуем оба парсера
+
                 rows = process_kaspi_gold_pdf(file_bytes)
+
                 if not rows:
                     rows = process_bcc_pdf(file_bytes)
 
+        # Нет операций
         if not rows:
-            await update.message.reply_text("❌ Не удалось найти операции в файле.")
+
+            await update.message.reply_text(
+                "❌ Не удалось найти операции в файле."
+            )
+
             return
 
+        # Загружаем в Google Sheets
         push_to_sheets(rows)
+
         await update.message.reply_text(
-            f"✅ Готово! Добавлено {len(rows)} строк в Google Sheets."
+            f"✅ Готово! Добавлено "
+            f"{len(rows)} строк в Google Sheets."
         )
+
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+        logger.error(
+            f"Error: {e}",
+            exc_info=True
+        )
+
+        await update.message.reply_text(
+            f"❌ Ошибка: {str(e)}"
+        )
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
