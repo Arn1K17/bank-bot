@@ -9,6 +9,7 @@ import gspread
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 from google.oauth2.service_account import Credentials
+from pdfminer.pdfparser import PDFSyntaxError
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,8 +41,17 @@ def parse_pdf(file_bytes: bytes):
 
     try:
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+
+            # защита от пустых/битых pdf
+            if not pdf.pages:
+                return []
+
             for page in pdf.pages:
-                text = page.extract_text()
+                try:
+                    text = page.extract_text()
+                except Exception:
+                    continue
+
                 if not text:
                     continue
 
@@ -50,6 +60,9 @@ def parse_pdf(file_bytes: bytes):
                     if line:
                         rows.append([line])
 
+    except PDFSyntaxError:
+        logging.error("Invalid PDF file (PDFSyntaxError)")
+        return []
     except Exception as e:
         logging.error(f"PDF parse error: {e}")
         return []
@@ -57,11 +70,14 @@ def parse_pdf(file_bytes: bytes):
     return rows
 
 
-# ---------------- SHEETS PUSH ----------------
+# ---------------- SHEETS PUSH (FAST VERSION) ----------------
 def push(rows):
     try:
         sheet = get_sheet()
-        sheet.append_rows(rows)
+
+        # быстрее чем append_rows для больших данных
+        sheet.append_rows(rows, value_input_option="RAW")
+
     except Exception as e:
         logging.error(f"Google Sheets error: {e}")
 
@@ -72,7 +88,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc:
         return
 
-    file_name = doc.file_name.lower()
+    file_name = (doc.file_name or "").lower()
 
     await update.message.reply_text("Processing...")
 
@@ -80,7 +96,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_bytes = await file.download_as_bytearray()
     file_bytes = bytes(file_bytes)
 
-    # ---- ONLY PDF ----
+    # ---- FILTER ----
     if not file_name.endswith(".pdf"):
         await update.message.reply_text("❌ Only PDF supported right now")
         return
@@ -88,7 +104,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = parse_pdf(file_bytes)
 
     if not rows:
-        await update.message.reply_text("❌ No data found in file")
+        await update.message.reply_text("❌ No readable text in PDF (or file is invalid)")
         return
 
     push(rows)
@@ -97,19 +113,14 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- MAIN ----------------
-async def main():
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.Document.ALL, handle))
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-
     print("Bot started")
-
-    await asyncio.Event().wait()
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
