@@ -6,6 +6,7 @@ from io import BytesIO
 from datetime import datetime
 
 import openpyxl
+import pdfplumber
 import gspread
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
@@ -28,6 +29,7 @@ IBAN_MAP = {
     "KZ508562203134868457": "БЦК ТОО",
     "KZ97722C000015235365": "Арман каспи голд",
     "KZ038562204137753855": "БЦК Имангазиева",
+    "KZ448562204152575978": "БЦК Серик ИП",
 }
 
 def get_sheet():
@@ -39,9 +41,6 @@ def get_sheet():
     )
     client = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
-def cell_val(cell):
-    return cell.value if cell and cell.value is not None else ""
 
 def format_date(val):
     if isinstance(val, datetime):
@@ -108,16 +107,17 @@ def fmt_amount(val):
     except:
         return str(val)
 
+def cell_val(cell):
+    return cell.value if cell and cell.value is not None else ""
+
+# ============ XLSX ============
 def process_xlsx(file_bytes):
     rows = []
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     ws = wb.active
-
-    # Get IBAN from row 3, column C (row=3, col=3)
     iban = str(cell_val(ws.cell(row=3, column=3))).strip()
     account = IBAN_MAP.get(iban, iban)
 
-    # Data starts from row 14
     for row_idx in range(14, ws.max_row + 1):
         date_val = cell_val(ws.cell(row=row_idx, column=2))
         debit = cell_val(ws.cell(row=row_idx, column=3))
@@ -156,15 +156,128 @@ def process_xlsx(file_bytes):
                      get_article(desc, amount), desc, "", ""])
     return rows
 
+# ============ PDF Kaspi Gold ============
+def process_kaspi_gold_pdf(file_bytes):
+    rows = []
+    account = "Арман каспи голд"
+    iban = "KZ97722C000015235365"
+
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 3:
+                        continue
+                    date_cell = str(row[0] or "").strip()
+                    amount_cell = str(row[1] or "").strip()
+                    desc_cell = str(row[2] or "").strip() if len(row) > 2 else ""
+                    if len(row) > 3 and row[3]:
+                        desc_cell = desc_cell + " " + str(row[3]).strip()
+
+                    # Check if date matches dd.mm.yy or dd.mm.yyyy
+                    if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
+                        continue
+
+                    # Parse amount
+                    amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "")
+                    amount_clean = amount_clean.replace(",", ".")
+                    sign = 1
+                    if amount_clean.startswith("-"):
+                        sign = -1
+                        amount_clean = amount_clean[1:]
+                    elif amount_clean.startswith("+"):
+                        amount_clean = amount_clean[1:]
+
+                    try:
+                        amount = sign * float(amount_clean)
+                    except:
+                        continue
+
+                    date_str = format_date(date_cell)
+                    month = get_month(desc_cell, date_str)
+                    year = date_str[-4:] if date_str else ""
+                    week = get_week(date_str)
+
+                    rows.append([year, str(month), str(week), date_str,
+                                 fmt_amount(amount), str(month), account,
+                                 get_article(desc_cell, amount), desc_cell, "", ""])
+    return rows
+
+# ============ PDF BCC ============
+def process_bcc_pdf(file_bytes):
+    rows = []
+    iban = ""
+    account = "БЦК Серик ИП"
+
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            full_text += text + "\n"
+
+            # Try to find IBAN
+            if not iban:
+                m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
+                if m:
+                    iban = m.group(1).strip()
+                    account = IBAN_MAP.get(iban, iban)
+
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 6:
+                        continue
+
+                    # BCC format: № | Date | BIK | IIK | IIN | Correspondent | IIN rec | Debit | Credit | KNP | Bank | Purpose
+                    date_cell = str(row[1] or "").strip()
+                    debit_cell = str(row[7] or "").strip() if len(row) > 7 else ""
+                    credit_cell = str(row[8] or "").strip() if len(row) > 8 else ""
+                    desc_cell = str(row[11] or "").strip() if len(row) > 11 else ""
+
+                    # Find date in cell
+                    date_m = re.search(r"\d{2}\.\d{2}\.\d{4}", date_cell)
+                    if not date_m:
+                        continue
+
+                    date_str = format_date(date_m.group())
+
+                    def parse_num(s):
+                        s = s.replace(" ", "").replace("\xa0", "").replace(",", ".")
+                        try:
+                            return float(s)
+                        except:
+                            return 0
+
+                    debit = parse_num(debit_cell)
+                    credit = parse_num(credit_cell)
+
+                    if debit > 0:
+                        amount = -debit
+                    elif credit > 0:
+                        amount = credit
+                    else:
+                        continue
+
+                    month = get_month(desc_cell, date_str)
+                    year = date_str[-4:] if date_str else ""
+                    week = get_week(date_str)
+
+                    rows.append([year, str(month), str(week), date_str,
+                                 fmt_amount(amount), str(month), account,
+                                 get_article(desc_cell, amount), desc_cell, "", ""])
+    return rows
+
+# ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc:
-        await update.message.reply_text("Отправьте файл выписки (.xlsx)")
+        await update.message.reply_text("Отправьте файл выписки (.xlsx или .pdf)")
         return
 
     fname = (doc.file_name or "").lower()
-    if not fname.endswith(".xlsx"):
-        await update.message.reply_text("Поддерживаются только .xlsx файлы")
+    if not (fname.endswith(".xlsx") or fname.endswith(".pdf")):
+        await update.message.reply_text("Поддерживаются только .xlsx и .pdf файлы")
         return
 
     await update.message.reply_text("⏳ Обрабатываю выписку...")
@@ -172,7 +285,20 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(doc.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
-        rows = process_xlsx(file_bytes)
+
+        if fname.endswith(".xlsx"):
+            rows = process_xlsx(file_bytes)
+        else:
+            # Определяем тип PDF по содержимому
+            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                first_page_text = pdf.pages[0].extract_text() or ""
+
+            if "Kaspi Gold" in first_page_text or "Kaspi.kz" in first_page_text or "KZ97722C" in first_page_text:
+                rows = process_kaspi_gold_pdf(file_bytes)
+            elif "ЦентрКредит" in first_page_text or "BCC" in first_page_text or "KZ44856" in first_page_text:
+                rows = process_bcc_pdf(file_bytes)
+            else:
+                rows = process_kaspi_gold_pdf(file_bytes)
 
         if not rows:
             await update.message.reply_text("❌ Операции не найдены в файле")
@@ -189,7 +315,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.Document.ALL, handle))
     logger.info("Bot started!")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
