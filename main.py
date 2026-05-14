@@ -5,7 +5,7 @@ import logging
 from io import BytesIO
 from datetime import datetime
 
-import pandas as pd
+import openpyxl
 import gspread
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
@@ -40,7 +40,12 @@ def get_sheet():
     client = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
 
+def cell_val(cell):
+    return cell.value if cell and cell.value is not None else ""
+
 def format_date(val):
+    if isinstance(val, datetime):
+        return val.strftime("%d/%m/%Y")
     s = str(val).strip()
     m = re.match(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", s)
     if m:
@@ -105,31 +110,43 @@ def fmt_amount(val):
 
 def process_xlsx(file_bytes):
     rows = []
-    df = pd.read_excel(BytesIO(file_bytes), sheet_name=0, header=None)
-    iban = str(df.iloc[2, 2]).strip()
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+
+    # Get IBAN from row 3, column C (row=3, col=3)
+    iban = str(cell_val(ws.cell(row=3, column=3))).strip()
     account = IBAN_MAP.get(iban, iban)
 
-    for idx in range(13, len(df)):
-        row = df.iloc[idx]
-        date_val = row[1]
-        debit = row[2]
-        credit = row[3]
-        desc = str(row[8]) if not pd.isna(row[8]) else ""
+    # Data starts from row 14
+    for row_idx in range(14, ws.max_row + 1):
+        date_val = cell_val(ws.cell(row=row_idx, column=2))
+        debit = cell_val(ws.cell(row=row_idx, column=3))
+        credit = cell_val(ws.cell(row=row_idx, column=4))
+        desc = str(cell_val(ws.cell(row=row_idx, column=9)))
 
-        if pd.isna(date_val) or not re.search(r"\d{2}\.\d{2}\.\d{4}", str(date_val)):
-            continue
-
-        has_d = not pd.isna(debit) and str(debit).strip() not in ("", "nan")
-        has_c = not pd.isna(credit) and str(credit).strip() not in ("", "nan")
-
-        if has_d:
-            amount = -float(str(debit).replace(" ", "").replace(",", "."))
-        elif has_c:
-            amount = float(str(credit).replace(" ", "").replace(",", "."))
-        else:
+        if not date_val:
             continue
 
         date_str = format_date(date_val)
+        if not re.search(r"\d{2}/\d{2}/\d{4}", date_str):
+            continue
+
+        has_d = debit not in ("", None, "None")
+        has_c = credit not in ("", None, "None")
+
+        if has_d:
+            try:
+                amount = -float(str(debit).replace(" ", "").replace(",", "."))
+            except:
+                continue
+        elif has_c:
+            try:
+                amount = float(str(credit).replace(" ", "").replace(",", "."))
+            except:
+                continue
+        else:
+            continue
+
         month = get_month(desc, date_str)
         year = date_str[-4:] if date_str else ""
         week = get_week(date_str)
