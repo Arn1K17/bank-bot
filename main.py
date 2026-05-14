@@ -210,45 +210,40 @@ def process_bcc_pdf(file_bytes):
     iban = ""
     account = "БЦК Серик ИП"
 
+    def parse_num(s):
+        s = str(s or "").replace(" ", "").replace("\xa0", "").replace(",", ".").replace("\n", "")
+        try:
+            return float(s)
+        except:
+            return 0
+
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        full_text = ""
+        # Find IBAN in first page text
+        first_text = pdf.pages[0].extract_text() or ""
+        m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", first_text)
+        if m:
+            iban = m.group(1).strip()
+            account = IBAN_MAP.get(iban, iban)
+
         for page in pdf.pages:
-            text = page.extract_text() or ""
-            full_text += text + "\n"
-
-            # Try to find IBAN
-            if not iban:
-                m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
-                if m:
-                    iban = m.group(1).strip()
-                    account = IBAN_MAP.get(iban, iban)
-
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
-                    if not row or len(row) < 6:
+                    if not row or len(row) < 12:
                         continue
 
-                    # BCC format: № | Date | BIK | IIK | IIN | Correspondent | IIN rec | Debit | Credit | KNP | Bank | Purpose
-                    date_cell = str(row[1] or "").strip()
-                    debit_cell = str(row[7] or "").strip() if len(row) > 7 else ""
-                    credit_cell = str(row[8] or "").strip() if len(row) > 8 else ""
-                    desc_cell = str(row[11] or "").strip() if len(row) > 11 else ""
+                    # col[1] = date (may have newline: "10.05.202\n6 02:44")
+                    date_cell = str(row[1] or "").replace("\n", "").strip()
+                    debit_cell = str(row[7] or "").strip()
+                    credit_cell = str(row[8] or "").strip()
+                    desc_cell = str(row[11] or "").replace("\n", " ").strip()
 
-                    # Find date in cell
+                    # Find date pattern in combined cell
                     date_m = re.search(r"\d{2}\.\d{2}\.\d{4}", date_cell)
                     if not date_m:
                         continue
 
                     date_str = format_date(date_m.group())
-
-                    def parse_num(s):
-                        s = s.replace(" ", "").replace("\xa0", "").replace(",", ".")
-                        try:
-                            return float(s)
-                        except:
-                            return 0
-
                     debit = parse_num(debit_cell)
                     credit = parse_num(credit_cell)
 
