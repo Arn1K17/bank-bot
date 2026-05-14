@@ -31,6 +31,7 @@ IBAN_MAP = {
     "KZ508562203134868457": "БЦК ТОО",
     "KZ97722C000015235365": "Арман каспи голд",
     "KZ038562204137753855": "БЦК Имангазиева",
+    "KZ448562204152575978": "БЦК ИП Серик",
 }
 
 def get_account_name(iban):
@@ -38,6 +39,7 @@ def get_account_name(iban):
 
 def format_date(val):
     s = str(val).strip()
+    # dd.mm.yy -> dd/mm/20yy
     m = re.match(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", s)
     if m:
         d, mo, y = m.group(1), m.group(2), m.group(3)
@@ -124,7 +126,6 @@ def process_kaspi_xlsx(file_bytes):
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     ws = wb.active
 
-    # Get IBAN from row 3, column C (index 2)
     iban = ""
     try:
         iban = str(ws.cell(row=3, column=3).value).strip()
@@ -142,7 +143,6 @@ def process_kaspi_xlsx(file_bytes):
             continue
         date_str_raw = str(date_val).strip()
         if not re.search(r"\d{2}[.\-/]\d{2}[.\-/]\d{4}", date_str_raw):
-            # Try datetime object
             if hasattr(date_val, 'strftime'):
                 date_str_raw = date_val.strftime("%d.%m.%Y")
             else:
@@ -181,53 +181,178 @@ def process_kaspi_xlsx(file_bytes):
                      str(month), account, article, desc, "", ""])
     return rows
 
-def process_bcc_pdf(file_bytes):
+
+def detect_pdf_bank(file_bytes):
+    """Определяем банк по тексту первой страницы PDF"""
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            first_page_text = pdf.pages[0].extract_text() or ""
+            if "Kaspi" in first_page_text or "kaspi" in first_page_text or "CASPKZKA" in first_page_text:
+                return "kaspi_gold"
+            if "ЦентрКредит" in first_page_text or "BCC" in first_page_text or "KCJBKZKX" in first_page_text:
+                return "bcc"
+    except:
+        pass
+    return "unknown"
+
+
+def process_kaspi_gold_pdf(file_bytes):
+    """
+    Парсит PDF выписку Kaspi Gold.
+    Формат таблицы: Дата | Сумма | Операция | Детали
+    Пример строки: 12.05.26 | - 2 670,00 ₸ | Покупка | YANDEX.GO
+    """
     rows = []
-    account = "БЦК ТОО"
-    
+    account = "Арман каспи голд"
+
+    # Пытаемся найти IBAN в тексте
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                iban_match = re.search(r"KZ\w{18}", text)
+                if iban_match:
+                    found_iban = iban_match.group(0)
+                    if found_iban in IBAN_MAP:
+                        account = IBAN_MAP[found_iban]
+                    break
+    except:
+        pass
+
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
-                    if not row or len(row) < 4:
+                    if not row or len(row) < 3:
                         continue
+
+                    # Ищем строки где первая колонка — дата вида dd.mm.yy
                     date_val = str(row[0]).strip() if row[0] else ""
-                    if not re.match(r"\d{2}\.\d{2}\.\d{4}", date_val):
+                    date_match = re.match(r"(\d{1,2})\.(\d{2})\.(\d{2,4})$", date_val)
+                    if not date_match:
                         continue
-                    
-                    desc = str(row[-1]).strip() if row[-1] else ""
-                    amount_str_raw = ""
-                    
-                    # Try to find amount columns
-                    for cell in row[1:]:
-                        cell_str = str(cell).strip() if cell else ""
-                        if re.match(r"[\d\s]+[.,]\d{2}", cell_str):
-                            amount_str_raw = cell_str
-                            break
-                    
-                    if not amount_str_raw:
-                        continue
-                    
+
+                    # Нормализуем дату
+                    d, mo, y = date_match.group(1), date_match.group(2), date_match.group(3)
+                    if len(y) == 2:
+                        y = "20" + y
+                    date_str = f"{int(d):02d}/{int(mo):02d}/{y}"
+
+                    # Сумма во второй колонке: "- 2 670,00 ₸" или "+ 200 000,00 ₸"
+                    amount_raw = str(row[1]).strip() if row[1] else ""
+                    amount_raw = amount_raw.replace("₸", "").replace("\u20b8", "").strip()
+                    amount_raw = re.sub(r"\s+", "", amount_raw)  # убираем пробелы внутри числа
+                    # Знак: "-" или "+"
+                    sign = 1
+                    if amount_raw.startswith("-"):
+                        sign = -1
+                        amount_raw = amount_raw[1:]
+                    elif amount_raw.startswith("+"):
+                        amount_raw = amount_raw[1:]
+                    amount_raw = amount_raw.replace(",", ".")
                     try:
-                        amount = float(amount_str_raw.replace(" ", "").replace(",", "."))
+                        amount = sign * float(amount_raw)
                     except:
                         continue
 
-                    date_str = format_date(date_val)
-                    month = get_month_from_payment(desc)
-                    if month is None:
-                        m = re.match(r"\d{2}\.(\d{2})\.\d{4}", date_val)
-                        month = int(m.group(1)) if m else ""
+                    # Тип операции (3-я колонка) и детали (4-я колонка)
+                    operation = str(row[2]).strip() if len(row) > 2 and row[2] else ""
+                    details = str(row[3]).strip() if len(row) > 3 and row[3] else ""
+                    # Иногда детали разбиты на 2 строки внутри ячейки
+                    details = details.replace("\n", " ").strip()
 
-                    year = date_str[-4:] if date_str else ""
+                    desc = f"{operation}: {details}" if details else operation
+
+                    month = int(mo)
+                    year_str = y
                     week = get_week_number(date_str)
                     article = get_article(desc, amount)
                     amount_fmt = format_amount(amount)
 
-                    rows.append([year, str(month), str(week), date_str, amount_fmt,
+                    rows.append([year_str, str(month), str(week), date_str, amount_fmt,
+                                 str(month), account, article, desc, "", ""])
+
+    return rows
+
+
+def process_bcc_pdf(file_bytes):
+    """
+    Парсит PDF выписку BCC Business (Банк ЦентрКредит).
+    Сложная таблица: №, Дата, БИК, ИИК, ИИН отправителя, Корреспондент,
+                     ИИН получателя, Дебет, Кредит, КНП, Банк, Назначение платежа
+    """
+    rows = []
+    account = "БЦК ИП Серик"
+
+    # Пытаемся найти ИИК клиента
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                iban_match = re.search(r"KZ\d{2}\w{14,16}", text)
+                if iban_match:
+                    found_iban = iban_match.group(0)
+                    if found_iban in IBAN_MAP:
+                        account = IBAN_MAP[found_iban]
+                    break
+    except:
+        pass
+
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 8:
+                        continue
+
+                    # В BCC таблице дата во 2-й колонке (индекс 1)
+                    date_val = str(row[1]).strip() if row[1] else ""
+                    # Убираем время если есть: "10.05.2026 02:44" -> "10.05.2026"
+                    date_val = date_val.split()[0] if date_val else ""
+                    date_match = re.match(r"(\d{1,2})\.(\d{2})\.(\d{4})$", date_val)
+                    if not date_match:
+                        continue
+
+                    d, mo, y = date_match.group(1), date_match.group(2), date_match.group(3)
+                    date_str = f"{int(d):02d}/{int(mo):02d}/{y}"
+
+                    # Дебет — индекс 7, Кредит — индекс 8
+                    debit_raw = str(row[7]).strip() if len(row) > 7 and row[7] else ""
+                    credit_raw = str(row[8]).strip() if len(row) > 8 and row[8] else ""
+                    desc = str(row[-1]).strip() if row[-1] else ""
+                    desc = desc.replace("\n", " ").strip()
+
+                    amount = None
+                    def parse_bcc_amount(s):
+                        s = re.sub(r"\s+", "", s).replace(",", ".")
+                        try:
+                            return float(s)
+                        except:
+                            return None
+
+                    if debit_raw and re.search(r"\d", debit_raw):
+                        val = parse_bcc_amount(debit_raw)
+                        if val:
+                            amount = -val  # расход
+                    elif credit_raw and re.search(r"\d", credit_raw):
+                        val = parse_bcc_amount(credit_raw)
+                        if val:
+                            amount = val  # приход
+
+                    if amount is None:
+                        continue
+
+                    month = int(mo)
+                    week = get_week_number(date_str)
+                    article = get_article(desc, amount)
+                    amount_fmt = format_amount(amount)
+
+                    rows.append([y, str(month), str(week), date_str, amount_fmt,
                                  str(month), account, article, desc, "", ""])
     return rows
+
 
 def push_to_sheets(rows):
     creds_dict = json.loads(GOOGLE_CREDENTIALS)
@@ -253,12 +378,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         file = await context.bot.get_file(doc.file_id)
-        file_bytes = await file.download_as_bytearray()
+        file_bytes = bytes(await file.download_as_bytearray())
 
         if fname.endswith(".xlsx"):
-            rows = process_kaspi_xlsx(bytes(file_bytes))
+            rows = process_kaspi_xlsx(file_bytes)
         else:
-            rows = process_bcc_pdf(bytes(file_bytes))
+            bank = detect_pdf_bank(file_bytes)
+            logger.info(f"Detected bank: {bank} for file: {fname}")
+            if bank == "kaspi_gold":
+                rows = process_kaspi_gold_pdf(file_bytes)
+            elif bank == "bcc":
+                rows = process_bcc_pdf(file_bytes)
+            else:
+                # Пробуем оба парсера
+                rows = process_kaspi_gold_pdf(file_bytes)
+                if not rows:
+                    rows = process_bcc_pdf(file_bytes)
 
         if not rows:
             await update.message.reply_text("❌ Не удалось найти операции в файле.")
@@ -269,7 +404,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Готово! Добавлено {len(rows)} строк в Google Sheets."
         )
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Error: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 def main():
