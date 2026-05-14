@@ -226,3 +226,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+print("BOT TOKEN:", bool(BOT_TOKEN))
+print("CREDS EXISTS:", bool(GOOGLE_CREDENTIALS))
+print("SPREADSHEET:", SPREADSHEET_ID)
