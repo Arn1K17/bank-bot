@@ -167,7 +167,11 @@ def process_kaspi_pdf(file_bytes):
 
 # ---------------- GOOGLE SHEETS ----------------
 def push(rows):
+    try:
     creds_info = json.loads(GOOGLE_CREDENTIALS)
+except Exception as e:
+    print("GOOGLE_CREDENTIALS ERROR:", e)
+    raise
 
     creds = Credentials.from_service_account_info(
         creds_info,
