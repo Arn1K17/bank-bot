@@ -20,7 +20,12 @@ SHEET_NAME = os.getenv("SHEET_NAME", "Sheet1")
 
 # ---------------- GOOGLE SHEETS ----------------
 def get_sheet():
-    creds_dict = json.loads(GOOGLE_CREDENTIALS)
+    creds_json = os.getenv("GOOGLE_CREDENTIALS")
+
+    if not creds_json:
+        raise Exception("GOOGLE_CREDENTIALS missing")
+
+    creds_dict = json.loads(creds_json)
 
     creds = Credentials.from_service_account_info(
         creds_dict,
@@ -31,8 +36,8 @@ def get_sheet():
     )
 
     client = gspread.authorize(creds)
-    return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
 
+    return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
 
 # ---------------- PDF PARSER ----------------
 def parse_pdf(file_bytes: bytes):
@@ -111,3 +116,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+async def main():
+    print("BOT_TOKEN:", BOT_TOKEN is not None)
+    print("SPREADSHEET_ID:", SPREADSHEET_ID)
+    print("GOOGLE_CREDENTIALS:", GOOGLE_CREDENTIALS is not None)
+
+    app = Application.builder().token(BOT_TOKEN).build()
