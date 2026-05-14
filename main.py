@@ -2,7 +2,6 @@ import os
 import re
 import logging
 import requests
-import pandas as pd
 from io import BytesIO
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -10,6 +9,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 from datetime import datetime
+import openpyxl
+import pdfplumber
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,10 +35,8 @@ IBAN_MAP = {
 def get_account_name(iban):
     return IBAN_MAP.get(iban, iban)
 
-def format_date(date_val):
-    if pd.isna(date_val):
-        return ""
-    s = str(date_val).strip()
+def format_date(val):
+    s = str(val).strip()
     m = re.match(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", s)
     if m:
         d, mo, y = m.group(1), m.group(2), m.group(3)
@@ -47,7 +46,7 @@ def format_date(date_val):
     return s
 
 def get_month_from_payment(description):
-    if not description or pd.isna(description):
+    if not description:
         return None
     desc = str(description)
     m = re.search(r"\d{1,2}[./]\d{1,2}[./]\d{2,4}", desc)
@@ -74,7 +73,7 @@ def get_month_from_payment(description):
     return None
 
 def get_article(description, amount):
-    if not description or pd.isna(description):
+    if not description:
         return ""
     desc = str(description)
     commission_keywords = [
@@ -101,8 +100,6 @@ def get_article(description, amount):
     return ""
 
 def format_amount(val):
-    if pd.isna(val):
-        return ""
     try:
         f = float(val)
         if f == int(f):
@@ -118,36 +115,60 @@ def get_week_number(date_str):
     except:
         return ""
 
+def is_empty(val):
+    return val is None or str(val).strip() in ("", "None", "nan")
+
 def process_kaspi_xlsx(file_bytes):
     rows = []
-    df = pd.read_excel(BytesIO(file_bytes), sheet_name=0, header=None)
-    iban = str(df.iloc[2, 2]).strip()
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+
+    # Get IBAN from row 3, column C (index 2)
+    iban = ""
+    try:
+        iban = str(ws.cell(row=3, column=3).value).strip()
+    except:
+        pass
     account = get_account_name(iban)
 
-    for idx in range(13, len(df)):
-        row = df.iloc[idx]
-        date_val = row[1]
-        debit = row[2]
-        credit = row[3]
-        desc = str(row[8]) if not pd.isna(row[8]) else ""
+    for idx in range(14, ws.max_row + 1):
+        date_val = ws.cell(row=idx, column=2).value
+        debit = ws.cell(row=idx, column=3).value
+        credit = ws.cell(row=idx, column=4).value
+        desc_val = ws.cell(row=idx, column=9).value
 
-        if pd.isna(date_val) or not re.search(r"\d{2}\.\d{2}\.\d{4}", str(date_val)):
+        if is_empty(date_val):
             continue
+        date_str_raw = str(date_val).strip()
+        if not re.search(r"\d{2}[.\-/]\d{2}[.\-/]\d{4}", date_str_raw):
+            # Try datetime object
+            if hasattr(date_val, 'strftime'):
+                date_str_raw = date_val.strftime("%d.%m.%Y")
+            else:
+                continue
 
-        has_debit = not pd.isna(debit) and str(debit).strip() not in ("", "nan")
-        has_credit = not pd.isna(credit) and str(credit).strip() not in ("", "nan")
+        desc = str(desc_val).strip() if not is_empty(desc_val) else ""
+
+        has_debit = not is_empty(debit)
+        has_credit = not is_empty(credit)
 
         if has_debit:
-            amount = -float(str(debit).replace(" ", "").replace(",", "."))
+            try:
+                amount = -float(str(debit).replace(" ", "").replace(",", "."))
+            except:
+                continue
         elif has_credit:
-            amount = float(str(credit).replace(" ", "").replace(",", "."))
+            try:
+                amount = float(str(credit).replace(" ", "").replace(",", "."))
+            except:
+                continue
         else:
             continue
 
-        date_str = format_date(date_val)
+        date_str = format_date(date_str_raw)
         month = get_month_from_payment(desc)
         if month is None:
-            m = re.match(r"\d{2}\.(\d{2})\.\d{4}", str(date_val))
+            m = re.match(r"\d{2}[.\-/](\d{2})[.\-/]\d{4}", date_str_raw)
             month = int(m.group(1)) if m else ""
 
         year = date_str[-4:] if date_str else ""
@@ -157,6 +178,54 @@ def process_kaspi_xlsx(file_bytes):
 
         rows.append([year, str(month), str(week), date_str, amount_str,
                      str(month), account, article, desc, "", ""])
+    return rows
+
+def process_bcc_pdf(file_bytes):
+    rows = []
+    account = "БЦК ТОО"
+    
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 4:
+                        continue
+                    date_val = str(row[0]).strip() if row[0] else ""
+                    if not re.match(r"\d{2}\.\d{2}\.\d{4}", date_val):
+                        continue
+                    
+                    desc = str(row[-1]).strip() if row[-1] else ""
+                    amount_str_raw = ""
+                    
+                    # Try to find amount columns
+                    for cell in row[1:]:
+                        cell_str = str(cell).strip() if cell else ""
+                        if re.match(r"[\d\s]+[.,]\d{2}", cell_str):
+                            amount_str_raw = cell_str
+                            break
+                    
+                    if not amount_str_raw:
+                        continue
+                    
+                    try:
+                        amount = float(amount_str_raw.replace(" ", "").replace(",", "."))
+                    except:
+                        continue
+
+                    date_str = format_date(date_val)
+                    month = get_month_from_payment(desc)
+                    if month is None:
+                        m = re.match(r"\d{2}\.(\d{2})\.\d{4}", date_val)
+                        month = int(m.group(1)) if m else ""
+
+                    year = date_str[-4:] if date_str else ""
+                    week = get_week_number(date_str)
+                    article = get_article(desc, amount)
+                    amount_fmt = format_amount(amount)
+
+                    rows.append([year, str(month), str(week), date_str, amount_fmt,
+                                 str(month), account, article, desc, "", ""])
     return rows
 
 def push_to_sheets(rows):
@@ -171,12 +240,12 @@ def push_to_sheets(rows):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc:
-        await update.message.reply_text("Пожалуйста, отправьте файл выписки (.xlsx)")
+        await update.message.reply_text("Пожалуйста, отправьте файл выписки (.xlsx или .pdf)")
         return
 
-    fname = doc.file_name or ""
-    if not fname.endswith(".xlsx"):
-        await update.message.reply_text("Поддерживаются только файлы .xlsx")
+    fname = (doc.file_name or "").lower()
+    if not (fname.endswith(".xlsx") or fname.endswith(".pdf")):
+        await update.message.reply_text("Поддерживаются только файлы .xlsx и .pdf")
         return
 
     await update.message.reply_text("⏳ Обрабатываю выписку...")
@@ -184,7 +253,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(doc.file_id)
         file_bytes = await file.download_as_bytearray()
-        rows = process_kaspi_xlsx(bytes(file_bytes))
+
+        if fname.endswith(".xlsx"):
+            rows = process_kaspi_xlsx(bytes(file_bytes))
+        else:
+            rows = process_bcc_pdf(bytes(file_bytes))
 
         if not rows:
             await update.message.reply_text("❌ Не удалось найти операции в файле.")
