@@ -404,53 +404,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows = process_kaspi_gold_pdf(file_bytes)
 
             # BCC ДИАГНОСТИКА
-            elif bank == "bcc":
-
-                with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-
-                    for i, page in enumerate(pdf.pages[:2]):
-
-                        tables = page.extract_tables()
-
-                        debug_msg = (
-                            f"Страница {i+1}: "
-                            f"таблиц={len(tables)}\n"
-                        )
-
-                        for j, table in enumerate(tables):
-
-                            debug_msg += (
-                                f"\nТаблица {j+1}:\n"
-                            )
-
-                            debug_msg += (
-                                f"Строк: {len(table)}\n"
-                            )
-
-                            if table and len(table) > 0:
-
-                                debug_msg += (
-                                    f"Колонок: "
-                                    f"{len(table[0])}\n"
-                                )
-
-                                debug_msg += (
-                                    f"Первая строка:\n"
-                                    f"{table[0]}\n"
-                                )
-
-                            if table and len(table) > 1:
-
-                                debug_msg += (
-                                    f"\nВторая строка:\n"
-                                    f"{table[1]}\n"
-                                )
-
-                        await update.message.reply_text(
-                            debug_msg[:4000]
-                        )
-
-                rows = []
+elif bank == "bcc":
+    rows = process_bcc_pdf(file_bytes)
 
             # UNKNOWN PDF
             else:
