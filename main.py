@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 import openpyxl
 import pdfplumber
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -275,6 +276,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     logger.info("Bot started!")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app.run_polling()
 
 if __name__ == "__main__":
