@@ -21,9 +21,19 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
+SHEET_NAME = os.getenv("SHEET_NAME", "Sheet1")
 
-# ---------------- ACCOUNTS ----------------
+# ---------------- SAFETY CHECK ----------------
+if not BOT_TOKEN:
+    raise Exception("BOT_TOKEN is missing")
+
+if not GOOGLE_CREDENTIALS:
+    raise Exception("GOOGLE_CREDENTIALS is missing")
+
+if not SPREADSHEET_ID:
+    raise Exception("SPREADSHEET_ID is missing")
+
+# ---------------- IBAN MAP ----------------
 IBAN_MAP = {
     "KZ81722S000020084562": "Kaspi Зухра",
     "KZ97722S000050068041": "Kaspi Серик",
@@ -36,7 +46,6 @@ IBAN_MAP = {
     "KZ448562204152575978": "BCC ИП Серик",
 }
 
-# ---------------- HELPERS ----------------
 def get_account(iban):
     return IBAN_MAP.get(iban, iban)
 
@@ -44,7 +53,7 @@ def is_empty(v):
     return v is None or str(v).strip() in ("", "None", "nan")
 
 def parse_date(date_str):
-    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", date_str)
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", str(date_str))
     if not m:
         return None
     d, mo, y = m.groups()
@@ -66,7 +75,7 @@ def format_amount(x):
     except:
         return str(x)
 
-# ---------------- XLSX (KASPI) ----------------
+# ---------------- XLSX ----------------
 def process_xlsx(file_bytes):
     rows = []
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
@@ -84,16 +93,15 @@ def process_xlsx(file_bytes):
         if is_empty(date_val):
             continue
 
-        date_str = parse_date(str(date_val))
+        date_str = parse_date(date_val)
         if not date_str:
             continue
 
         amount = None
-
         if not is_empty(debit):
-            amount = -float(str(debit).replace(",", ".").replace(" ", ""))
+            amount = -float(str(debit).replace(",", "."))
         elif not is_empty(credit):
-            amount = float(str(credit).replace(",", ".").replace(" ", ""))
+            amount = float(str(credit).replace(",", "."))
         else:
             continue
 
@@ -115,7 +123,7 @@ def detect_bank(file_bytes):
             text = pdf.pages[0].extract_text() or ""
             if "Kaspi" in text or "CASPKZKA" in text:
                 return "kaspi"
-            if "ЦентрКредит" in text or "BCC" in text:
+            if "BCC" in text or "ЦентрКредит" in text:
                 return "bcc"
     except:
         pass
@@ -124,25 +132,23 @@ def detect_bank(file_bytes):
 # ---------------- KASPI PDF ----------------
 def process_kaspi_pdf(file_bytes):
     rows = []
-    account = "Kaspi Gold"
+    account = "Kaspi"
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            for table in page.extract_tables() or []:
+            tables = page.extract_tables() or []
+            for table in tables:
                 for row in table:
                     if not row or len(row) < 2:
                         continue
 
-                    date_raw = str(row[0])
-                    date_str = parse_date(date_raw)
+                    date_str = parse_date(row[0])
                     if not date_str:
                         continue
 
-                    amount_raw = str(row[1]).replace("₸", "").replace(" ", "").replace(",", ".")
-                    sign = -1 if "-" in amount_raw else 1
-
+                    amount_raw = str(row[1]).replace("₸", "").replace(" ", "")
                     try:
-                        amount = sign * float(re.sub(r"[^\d.]", "", amount_raw))
+                        amount = float(re.sub(r"[^\d\-\.]", "", amount_raw))
                     except:
                         continue
 
@@ -159,50 +165,12 @@ def process_kaspi_pdf(file_bytes):
 
     return rows
 
-# ---------------- BCC PDF ----------------
-def process_bcc_pdf(file_bytes):
-    rows = []
-    account = "BCC"
-
-    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            for table in page.extract_tables() or []:
-                for row in table:
-                    if not row or len(row) < 9:
-                        continue
-
-                    date_str = parse_date(str(row[1] or ""))
-                    if not date_str:
-                        continue
-
-                    debit = row[7]
-                    credit = row[8]
-
-                    amount = None
-                    if not is_empty(debit):
-                        amount = -float(str(debit).replace(" ", "").replace(",", "."))
-                    elif not is_empty(credit):
-                        amount = float(str(credit).replace(" ", "").replace(",", "."))
-
-                    if amount is None:
-                        continue
-
-                    desc = str(row[-1] or "")
-                    month = date_str.split("/")[1]
-                    week = get_week(date_str)
-
-                    rows.append([
-                        date_str[-4:], month, week,
-                        date_str, format_amount(amount),
-                        account, desc
-                    ])
-
-    return rows
-
 # ---------------- GOOGLE SHEETS ----------------
 def push(rows):
+    creds_info = json.loads(GOOGLE_CREDENTIALS)
+
     creds = Credentials.from_service_account_info(
-        json.loads(GOOGLE_CREDENTIALS),
+        creds_info,
         scopes=[
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
@@ -215,35 +183,38 @@ def push(rows):
 
 # ---------------- TELEGRAM ----------------
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not doc:
-        return await update.message.reply_text("Send file")
+    try:
+        doc = update.message.document
+        if not doc:
+            return await update.message.reply_text("Send file")
 
-    name = doc.file_name.lower()
+        await update.message.reply_text("Processing...")
 
-    await update.message.reply_text("Processing...")
+        file = await context.bot.get_file(doc.file_id)
+        file_bytes = bytes(await file.download_as_bytearray())
 
-    file = await context.bot.get_file(doc.file_id)
-    file_bytes = bytes(await file.download_as_bytearray())
+        name = doc.file_name.lower()
+        rows = []
 
-    rows = []
+        if name.endswith(".xlsx"):
+            rows = process_xlsx(file_bytes)
+        else:
+            bank = detect_bank(file_bytes)
+            if bank == "kaspi":
+                rows = process_kaspi_pdf(file_bytes)
+            else:
+                return await update.message.reply_text("Unknown file")
 
-    if name.endswith(".xlsx"):
-        rows = process_xlsx(file_bytes)
-    else:
-        bank = detect_bank(file_bytes)
+        if not rows:
+            return await update.message.reply_text("No data found")
 
-        if bank == "kaspi":
-            rows = process_kaspi_pdf(file_bytes)
-        elif bank == "bcc":
-            rows = process_bcc_pdf(file_bytes)
+        push(rows)
 
-    if not rows:
-        return await update.message.reply_text("No data found")
+        await update.message.reply_text(f"Done: {len(rows)} rows")
 
-    push(rows)
-
-    await update.message.reply_text(f"Done: {len(rows)} rows")
+    except Exception as e:
+        logger.exception(e)
+        await update.message.reply_text(f"Error: {str(e)}")
 
 # ---------------- MAIN ----------------
 def main():
