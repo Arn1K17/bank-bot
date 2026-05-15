@@ -302,10 +302,9 @@ def find_account_in_справка(account_name: str, справка_data: list)
             best_score = score
             best_name = candidate
             try:
-                raw = str(row[1]).replace("\xa0", "").replace(" ", "").strip()
-                raw = re.sub(r",(\d{3})(?=[\d,]|$)", r"\1", raw)
-                raw = raw.replace(",", ".")
-                best_balance = float(raw)
+                best_balance = float(
+                    str(row[1]).replace(" ", "").replace(",", ".").replace("\xa0", "")
+                )
             except:
                 best_balance = None
     if best_score >= 0.4 and best_balance is not None:
@@ -685,6 +684,36 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         sheet = get_sheet()
+        existing_data = sheet.get_all_values()
+
+        # Проверка дублей по ключу: дата + сумма + счёт
+        existing_keys = set()
+        for row in existing_data[1:]:
+            if len(row) >= 7:
+                existing_keys.add((row[3].strip(), row[4].strip(), row[6].strip()))
+
+        dupes = sum(
+            1 for r in rows
+            if (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip()) in existing_keys
+        )
+
+        if dupes == len(rows):
+            await update.message.reply_text(
+                f"⚠️ Этот файл уже был загружен ранее!\n"
+                f"Все {len(rows)} строк уже есть в таблице. Ничего не добавлено."
+            )
+            return
+
+        if dupes > 0:
+            rows = [
+                r for r in rows
+                if (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip()) not in existing_keys
+            ]
+            await update.message.reply_text(
+                f"⚠️ {dupes} строк уже есть в таблице — пропускаю дубли.\n"
+                f"Добавляю {len(rows)} новых..."
+            )
+
         sheet.append_rows(rows, value_input_option="RAW")
 
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
