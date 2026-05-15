@@ -480,6 +480,16 @@ def process_bcc_pdf(file_bytes):
     return rows, account, closing_balance
 
 # ============ PDF Halyk (Народный Банк) ============
+def parse_kz_num(s):
+    """Парсит числа в казахстанском формате: 26,158.55 -> 26158.55"""
+    s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
+    s = re.sub(r",(\d{3})(?=[\d,.])", r"\1", s)  # убираем запятые-разделители тысяч
+    s = s.replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return 0
+
 def process_halyk_pdf(file_bytes):
     rows = []
     account = "Халык ИП Серик"
@@ -490,60 +500,58 @@ def process_halyk_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
-        # IBAN из шапки
-        m_iban = re.search(r"Счет\(Валюта\)[:\s]+(KZ[\w]+)", full_text)
-        if m_iban:
-            iban = m_iban.group(1).strip()
-            account = IBAN_MAP.get(iban, account)
+    # IBAN из шапки
+    m_iban = re.search(r"Счет\(Валюта\)[:\s]+(KZ[\w]+)", full_text)
+    if m_iban:
+        iban = m_iban.group(1).strip()
+        account = IBAN_MAP.get(iban, account)
 
-        # Исходящий остаток — ищем в конце документа
-        m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\d\s]+[.,]\d{2})", full_text)
-        if m_bal:
-            closing_balance = parse_num(m_bal.group(1))
+    # Исходящий остаток
+    m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
+    if m_bal:
+        closing_balance = parse_kz_num(m_bal.group(1))
 
-        # Парсим таблицу со всех страниц
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    if not row or len(row) < 4:
-                        continue
+    # Собираем блоки транзакций по строкам текста
+    lines = full_text.split("\n")
+    blocks = []
+    current = []
+    for line in lines:
+        line = line.strip()
+        if re.match(r"^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}", line):
+            if current:
+                blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append(current)
 
-                    # Колонки: Дата | Номер документа | Дебет | Кредит | Контрагент | Детали платежа
-                    date_cell  = str(row[0] or "").replace("\n", " ").strip()
-                    debit_cell = str(row[2] or "").replace("\n", "").replace(" ", "").replace("\xa0", "").strip()
-                    credit_cell = str(row[3] or "").replace("\n", "").replace(" ", "").replace("\xa0", "").strip()
-                    # Детали платежа — последняя непустая колонка
-                    desc_cell = ""
-                    for col in reversed(row):
-                        if col and str(col).strip():
-                            desc_cell = str(col).replace("\n", " ").strip()
-                            break
+    for block in blocks:
+        first = block[0]
+        full_desc = " ".join(block)
 
-                    # Проверяем формат даты DD.MM.YYYY
-                    date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", date_cell)
-                    if not date_m:
-                        continue
+        m = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+\S+\s+([\d,]+\.\d{2})", first)
+        if not m:
+            continue
 
-                    date_str = f"{int(date_m.group(1)):02d}/{date_m.group(2)}/{date_m.group(3)}"
+        date_raw = m.group(1)
+        amount = parse_kz_num(m.group(2))
 
-                    debit  = parse_num(debit_cell)
-                    credit = parse_num(credit_cell)
+        # Дебет (минус): снятие наличных, комиссия банка, перевод на другой счёт
+        desc_lower = full_desc.lower()
+        if any(kw in desc_lower for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
+            amount = -amount
 
-                    if debit > 0:
-                        amount = -debit
-                    elif credit > 0:
-                        amount = credit
-                    else:
-                        continue
+        d, mo, y = date_raw.split(".")
+        date_str = f"{int(d):02d}/{mo}/{y}"
 
-                    month = get_month(desc_cell, date_str)
-                    year  = date_str[-4:] if date_str else ""
-                    week  = get_week(date_str)
+        month = get_month(full_desc, date_str)
+        year = date_str[-4:] if date_str else ""
+        week = get_week(date_str)
 
-                    rows.append([year, str(month), str(week), date_str,
-                                 fmt_amount(amount), str(month), account,
-                                 get_article(desc_cell, amount), desc_cell, "", ""])
+        rows.append([year, str(month), str(week), date_str,
+                     fmt_amount(amount), str(month), account,
+                     get_article(full_desc, amount), full_desc[:200], "", ""])
 
     return rows, account, closing_balance
 
