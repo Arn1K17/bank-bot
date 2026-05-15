@@ -250,6 +250,14 @@ ACCOUNT_SYNONYMS = {
     "ип":          ["ип", "ip"],
 }
 
+# Взаимоисключающие группы банков — штраф если в запросе один банк, в кандидате другой
+BANK_CONFLICT_GROUPS = [
+    {"халык", "народный"},
+    {"каспи"},
+    {"бцк", "центркредит"},
+    {"втб"},
+]
+
 def _normalize_tokens(name: str) -> set:
     name = name.lower().strip()
     name = re.sub(r'[«»"\'(),.\-]', " ", name)
@@ -268,7 +276,18 @@ def _account_similarity(name_a: str, name_b: str) -> float:
     tb = _normalize_tokens(name_b)
     if not ta or not tb:
         return 0.0
-    return len(ta & tb) / max(len(ta), len(tb))
+    score = len(ta & tb) / max(len(ta), len(tb))
+    # Штраф если у запроса и кандидата разные банки
+    for group in BANK_CONFLICT_GROUPS:
+        a_in = bool(ta & group)
+        b_in = bool(tb & group)
+        a_other = any(ta & g for g in BANK_CONFLICT_GROUPS if g != group)
+        b_other = any(tb & g for g in BANK_CONFLICT_GROUPS if g != group)
+        if a_other and b_in and not (ta & group):
+            score *= 0.3
+        if b_other and a_in and not (tb & group):
+            score *= 0.3
+    return score
 
 def find_account_in_справка(account_name: str, справка_data: list):
     best_name = None
