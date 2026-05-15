@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import requests
 from io import BytesIO
 from datetime import datetime
 
@@ -19,6 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 IBAN_MAP = {
     "KZ81722S000020084562": "Каспи Имангазиева Зухра",
@@ -120,6 +122,102 @@ def parse_num(s):
         return float(s)
     except:
         return 0
+
+# ============ GEMINI AI ============
+def get_sheets_data_for_ai():
+    """Получаем данные из таблицы для контекста ИИ"""
+    try:
+        spreadsheet = get_spreadsheet()
+        реестр = spreadsheet.worksheet(SHEET_NAME)
+        data = реестр.get_all_values()
+
+        if len(data) < 2:
+            return "Данных в таблице пока нет."
+
+        headers = data[0]
+        rows = data[1:]
+
+        # Считаем статистику по месяцам и счетам
+        month_totals = {}
+        account_totals = {}
+        article_totals = {}
+
+        for row in rows:
+            if len(row) < 8:
+                continue
+            try:
+                month = row[1] if len(row) > 1 else ""
+                amount_str = row[4] if len(row) > 4 else "0"
+                account = row[6] if len(row) > 6 else ""
+                article = row[7] if len(row) > 7 else ""
+
+                amount = float(str(amount_str).replace(" ", "").replace(",", ".") or 0)
+
+                if month:
+                    month_totals[month] = month_totals.get(month, 0) + amount
+                if account:
+                    account_totals[account] = account_totals.get(account, 0) + amount
+                if article:
+                    article_totals[article] = article_totals.get(article, 0) + amount
+            except:
+                continue
+
+        month_names = {
+            "1":"Январь","2":"Февраль","3":"Март","4":"Апрель",
+            "5":"Май","6":"Июнь","7":"Июль","8":"Август",
+            "9":"Сентябрь","10":"Октябрь","11":"Ноябрь","12":"Декабрь"
+        }
+
+        summary = f"Всего строк в реестре: {len(rows)}\n\n"
+
+        summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
+        for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
+            name = month_names.get(m, f"Месяц {m}")
+            summary += f"  {name}: {month_totals[m]:,.0f} ₸\n"
+
+        summary += "\nОБОРОТЫ ПО СЧЕТАМ:\n"
+        for acc, total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
+            summary += f"  {acc}: {total:,.0f} ₸\n"
+
+        summary += "\nПО СТАТЬЯМ:\n"
+        for art, total in sorted(article_totals.items(), key=lambda x: -abs(x[1])):
+            if art:
+                summary += f"  {art}: {total:,.0f} ₸\n"
+
+        return summary
+    except Exception as e:
+        return f"Ошибка получения данных: {e}"
+
+def ask_gemini(question: str) -> str:
+    """Отправляем вопрос в Gemini с контекстом из таблицы"""
+    try:
+        sheets_data = get_sheets_data_for_ai()
+
+        prompt = f"""Ты финансовый помощник компании. У тебя есть данные из банковского реестра:
+
+{sheets_data}
+
+Отвечай на русском языке, кратко и понятно. Используй цифры из данных выше.
+Если спрашивают разницу между месяцами — посчитай и объясни.
+Если данных нет — скажи что данных недостаточно.
+
+Вопрос пользователя: {question}"""
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.3}
+        }
+
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        return f"❌ Ошибка ИИ: {str(e)}"
 
 # ============ СВЕРКА ОСТАТКОВ ============
 def check_balance(account_name, bank_closing_balance):
@@ -292,7 +390,7 @@ def process_kaspi_gold_pdf(file_bytes):
 def process_bcc_pdf(file_bytes):
     rows = []
     iban = ""
-    account = "БЦК Серик ИП"
+    account = "БЦК Ип Серик"
     closing_balance = None
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -300,13 +398,11 @@ def process_bcc_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
-        # IBAN
         m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
         if m:
             iban = m.group(1).strip()
             account = IBAN_MAP.get(iban, iban)
 
-        # Исходящее сальдо — ищем казахский и русский варианты
         m_bal = re.search(r"[Шш]ығыс сальдо[^:]*?:\s*([\d\s]+,\d{2})", full_text)
         if not m_bal:
             m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+,\d{2})", full_text)
@@ -320,13 +416,11 @@ def process_bcc_pdf(file_bytes):
                     if not row or len(row) < 12:
                         continue
 
-                    # Дата в колонке [1] — склеиваем перенос строки
                     date_cell = str(row[1] or "").replace("\n", "").strip()
                     debit_cell = str(row[7] or "").replace("\n", "").strip()
                     credit_cell = str(row[8] or "").replace("\n", "").strip()
                     desc_cell = str(row[11] or "").replace("\n", " ").strip()
 
-                    # Ищем дату в формате DD.MM.YYYY внутри строки
                     date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", date_cell)
                     if not date_m:
                         continue
@@ -354,9 +448,29 @@ def process_bcc_pdf(file_bytes):
 
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Если текстовое сообщение — отправляем в ИИ
+    if update.message.text:
+        question = update.message.text.strip()
+        if question.startswith("/start"):
+            await update.message.reply_text(
+                "👋 Привет! Я бухгалтерский бот.\n\n"
+                "📎 Отправьте файл выписки (.xlsx или .pdf) — загружу в таблицу.\n\n"
+                "💬 Или задайте вопрос текстом, например:\n"
+                "• Какая разница между апрелем и маем?\n"
+                "• Сколько пришло за май?\n"
+                "• Какой счёт имеет наибольший оборот?"
+            )
+            return
+
+        await update.message.reply_text("🤔 Думаю...")
+        answer = ask_gemini(question)
+        await update.message.reply_text(answer)
+        return
+
+    # Если файл — обрабатываем выписку
     doc = update.message.document
     if not doc:
-        await update.message.reply_text("Отправьте файл выписки (.xlsx или .pdf)")
+        await update.message.reply_text("Отправьте файл выписки (.xlsx или .pdf) или задайте вопрос текстом.")
         return
 
     fname = (doc.file_name or "").lower()
@@ -418,6 +532,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.Document.ALL, handle))
+    app.add_handler(MessageHandler(filters.TEXT, handle))
     logger.info("Bot started!")
     app.run_polling(drop_pending_updates=True)
 
