@@ -3,3 +3,4 @@ gspread==6.0.2
 google-auth==2.27.0
 openpyxl==3.1.2
 pdfplumber==0.10.3
+requests==2.31.0
