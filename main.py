@@ -20,7 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 IBAN_MAP = {
     "KZ81722S000020084562": "Каспи Имангазиева Зухра",
@@ -123,9 +123,8 @@ def parse_num(s):
     except:
         return 0
 
-# ============ GEMINI AI ============
+# ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
-    """Получаем данные из таблицы для контекста ИИ"""
     try:
         spreadsheet = get_spreadsheet()
         реестр = spreadsheet.worksheet(SHEET_NAME)
@@ -134,10 +133,7 @@ def get_sheets_data_for_ai():
         if len(data) < 2:
             return "Данных в таблице пока нет."
 
-        headers = data[0]
         rows = data[1:]
-
-        # Считаем статистику по месяцам и счетам
         month_totals = {}
         account_totals = {}
         article_totals = {}
@@ -150,9 +146,7 @@ def get_sheets_data_for_ai():
                 amount_str = row[4] if len(row) > 4 else "0"
                 account = row[6] if len(row) > 6 else ""
                 article = row[7] if len(row) > 7 else ""
-
                 amount = float(str(amount_str).replace(" ", "").replace(",", ".") or 0)
-
                 if month:
                     month_totals[month] = month_totals.get(month, 0) + amount
                 if account:
@@ -169,16 +163,13 @@ def get_sheets_data_for_ai():
         }
 
         summary = f"Всего строк в реестре: {len(rows)}\n\n"
-
         summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
         for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
             name = month_names.get(m, f"Месяц {m}")
             summary += f"  {name}: {month_totals[m]:,.0f} ₸\n"
-
         summary += "\nОБОРОТЫ ПО СЧЕТАМ:\n"
         for acc, total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
             summary += f"  {acc}: {total:,.0f} ₸\n"
-
         summary += "\nПО СТАТЬЯМ:\n"
         for art, total in sorted(article_totals.items(), key=lambda x: -abs(x[1])):
             if art:
@@ -188,8 +179,7 @@ def get_sheets_data_for_ai():
     except Exception as e:
         return f"Ошибка получения данных: {e}"
 
-def ask_gemini(question: str) -> str:
-    """Отправляем вопрос в Gemini с контекстом из таблицы"""
+def ask_ai(question: str) -> str:
     try:
         sheets_data = get_sheets_data_for_ai()
 
@@ -203,20 +193,34 @@ def ask_gemini(question: str) -> str:
 
 Вопрос пользователя: {question}"""
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.3}
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Arn1K17/bank-bot",
+            "X-Title": "Bank Bot"
         }
 
-        resp = requests.post(url, json=payload, timeout=30)
+        payload = {
+            "model": "meta-llama/llama-3.1-8b-instruct:free",
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.3
+        }
+
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
         resp.raise_for_status()
         result = resp.json()
-
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        text = result["choices"][0]["message"]["content"]
         return text.strip()
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
+        logger.error(f"OpenRouter error: {e}")
         return f"❌ Ошибка ИИ: {str(e)}"
 
 # ============ СВЕРКА ОСТАТКОВ ============
@@ -448,7 +452,6 @@ def process_bcc_pdf(file_bytes):
 
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если текстовое сообщение — отправляем в ИИ
     if update.message.text:
         question = update.message.text.strip()
         if question.startswith("/start"):
@@ -463,11 +466,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await update.message.reply_text("🤔 Думаю...")
-        answer = ask_gemini(question)
+        answer = ask_ai(question)
         await update.message.reply_text(answer)
         return
 
-    # Если файл — обрабатываем выписку
     doc = update.message.document
     if not doc:
         await update.message.reply_text("Отправьте файл выписки (.xlsx или .pdf) или задайте вопрос текстом.")
