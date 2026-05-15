@@ -233,20 +233,72 @@ def ask_ai(question: str) -> str:
         return f"❌ Ошибка ИИ: {str(e)}"
 
 # ============ СВЕРКА ОСТАТКОВ ============
+
+# Синонимы для нечёткого матчинга названий счетов
+ACCOUNT_SYNONYMS = {
+    "халык":       ["халык", "народный", "halyk", "hsbk"],
+    "каспи":       ["каспи", "kaspi", "каспий"],
+    "бцк":         ["бцк", "центркредит", "bcc", "kcjb"],
+    "серик":       ["серик", "серік"],
+    "имангазиева": ["имангазиева"],
+    "орынбаева":   ["орынбаева"],
+    "дильназ":     ["дильназ"],
+    "коко":        ["коко", "сулейменов"],
+    "арман":       ["арман"],
+    "голд":        ["голд", "gold"],
+    "тоо":         ["тоо"],
+    "ип":          ["ип", "ip"],
+}
+
+def _normalize_tokens(name: str) -> set:
+    name = name.lower().strip()
+    name = re.sub(r'[«»"\'(),.\-]', " ", name)
+    words = name.split()
+    tokens = set()
+    for word in words:
+        tokens.add(word)
+        for canon, synonyms in ACCOUNT_SYNONYMS.items():
+            if word in synonyms:
+                tokens.add(canon)
+                break
+    return tokens
+
+def _account_similarity(name_a: str, name_b: str) -> float:
+    ta = _normalize_tokens(name_a)
+    tb = _normalize_tokens(name_b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(len(ta), len(tb))
+
+def find_account_in_справка(account_name: str, справка_data: list):
+    best_name = None
+    best_balance = None
+    best_score = 0.0
+    for row in справка_data:
+        if not row or not row[0].strip():
+            continue
+        candidate = row[0].strip()
+        score = _account_similarity(account_name, candidate)
+        if score > best_score:
+            best_score = score
+            best_name = candidate
+            try:
+                best_balance = float(
+                    str(row[1]).replace(" ", "").replace(",", ".").replace("\xa0", "")
+                )
+            except:
+                best_balance = None
+    if best_score >= 0.4 and best_balance is not None:
+        return best_name, best_balance
+    return None, None
+
 def check_balance(account_name, bank_closing_balance):
     try:
         spreadsheet = get_spreadsheet()
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
 
-        initial_balance = None
-        for row in справка_data:
-            if row and row[0].strip() == account_name.strip():
-                try:
-                    initial_balance = float(str(row[1]).replace(" ", "").replace(",", ".").replace("\xa0", ""))
-                    break
-                except:
-                    pass
+        matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
 
         if initial_balance is None:
             return None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
@@ -256,11 +308,13 @@ def check_balance(account_name, bank_closing_balance):
 
         total_operations = 0.0
         for row in реестр_data[1:]:
-            if len(row) >= 7 and row[6].strip() == account_name.strip():
-                try:
-                    total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
-                except:
-                    pass
+            if len(row) >= 7:
+                row_acc = row[6].strip()
+                if row_acc == account_name.strip() or row_acc == matched_name:
+                    try:
+                        total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
+                    except:
+                        pass
 
         dds_balance = round(initial_balance + total_operations, 2)
         bank_balance = round(bank_closing_balance, 2)
