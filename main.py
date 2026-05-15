@@ -35,6 +35,7 @@ IBAN_MAP = {
     "KZ97722C000015235365": "Арман каспи голд",
     "KZ038562204137753855": "БЦК Имангазиева",
     "KZ448562204152575978": "БЦК Ип Серик",
+    "KZ03601A231012849031": "Халык ИП Серик",
 }
 
 def get_spreadsheet():
@@ -267,34 +268,54 @@ def check_balance(account_name, bank_closing_balance):
     except Exception as e:
         return None, None, str(e)
 
-# ============ XLSX ============
+# ============ XLSX Каспи (Каспи Голд и Каспи Pay — одна функция) ============
 def process_xlsx(file_bytes):
     rows = []
     closing_balance = None
 
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     ws = wb.active
+
+    # Читаем IBAN из строки 3, колонка C
     iban = str(cell_val(ws.cell(row=3, column=3))).strip()
     account = IBAN_MAP.get(iban, iban)
 
-    for row_idx in range(1, ws.max_row + 1):
-        for col_idx in range(1, ws.max_column + 1):
-            cell = str(cell_val(ws.cell(row=row_idx, column=col_idx))).lower()
-            if "исходящ" in cell and "сальдо" in cell:
-                for c in range(col_idx + 1, min(col_idx + 5, ws.max_column + 1)):
-                    v = cell_val(ws.cell(row=row_idx, column=c))
-                    if v:
-                        try:
-                            closing_balance = float(str(v).replace(" ", "").replace(",", "."))
-                            break
-                        except:
-                            pass
-                if closing_balance:
-                    break
-        if closing_balance:
+    # Ищем исходящий остаток — сначала проверяем строку 10 (Kaspi Pay формат)
+    closing_val = cell_val(ws.cell(row=10, column=3))
+    if closing_val and str(closing_val).replace(".", "").replace(",", "").strip().lstrip("-").isdigit():
+        try:
+            closing_balance = float(str(closing_val).replace(" ", "").replace(",", "."))
+        except:
+            pass
+
+    # Если не нашли в строке 10 — ищем по тексту "исходящ" (старый формат БЦК xlsx)
+    if not closing_balance:
+        for row_idx in range(1, ws.max_row + 1):
+            for col_idx in range(1, ws.max_column + 1):
+                cell = str(cell_val(ws.cell(row=row_idx, column=col_idx))).lower()
+                if "исходящ" in cell and "сальдо" in cell:
+                    for c in range(col_idx + 1, min(col_idx + 5, ws.max_column + 1)):
+                        v = cell_val(ws.cell(row=row_idx, column=c))
+                        if v:
+                            try:
+                                closing_balance = float(str(v).replace(" ", "").replace(",", "."))
+                                break
+                            except:
+                                pass
+                    if closing_balance:
+                        break
+            if closing_balance:
+                break
+
+    # Определяем строку начала данных — ищем строку с датой в колонке B
+    data_start = 14
+    for row_idx in range(12, min(20, ws.max_row + 1)):
+        val = cell_val(ws.cell(row=row_idx, column=2))
+        if val and re.search(r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}", str(val)):
+            data_start = row_idx
             break
 
-    for row_idx in range(14, ws.max_row + 1):
+    for row_idx in range(data_start, ws.max_row + 1):
         date_val = cell_val(ws.cell(row=row_idx, column=2))
         debit = cell_val(ws.cell(row=row_idx, column=3))
         credit = cell_val(ws.cell(row=row_idx, column=4))
@@ -458,6 +479,74 @@ def process_bcc_pdf(file_bytes):
 
     return rows, account, closing_balance
 
+# ============ PDF Halyk (Народный Банк) ============
+def process_halyk_pdf(file_bytes):
+    rows = []
+    account = "Халык ИП Серик"
+    closing_balance = None
+
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            full_text += (page.extract_text() or "") + "\n"
+
+        # IBAN из шапки
+        m_iban = re.search(r"Счет\(Валюта\)[:\s]+(KZ[\w]+)", full_text)
+        if m_iban:
+            iban = m_iban.group(1).strip()
+            account = IBAN_MAP.get(iban, account)
+
+        # Исходящий остаток — ищем в конце документа
+        m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\d\s]+[.,]\d{2})", full_text)
+        if m_bal:
+            closing_balance = parse_num(m_bal.group(1))
+
+        # Парсим таблицу со всех страниц
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 4:
+                        continue
+
+                    # Колонки: Дата | Номер документа | Дебет | Кредит | Контрагент | Детали платежа
+                    date_cell  = str(row[0] or "").replace("\n", " ").strip()
+                    debit_cell = str(row[2] or "").replace("\n", "").replace(" ", "").replace("\xa0", "").strip()
+                    credit_cell = str(row[3] or "").replace("\n", "").replace(" ", "").replace("\xa0", "").strip()
+                    # Детали платежа — последняя непустая колонка
+                    desc_cell = ""
+                    for col in reversed(row):
+                        if col and str(col).strip():
+                            desc_cell = str(col).replace("\n", " ").strip()
+                            break
+
+                    # Проверяем формат даты DD.MM.YYYY
+                    date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", date_cell)
+                    if not date_m:
+                        continue
+
+                    date_str = f"{int(date_m.group(1)):02d}/{date_m.group(2)}/{date_m.group(3)}"
+
+                    debit  = parse_num(debit_cell)
+                    credit = parse_num(credit_cell)
+
+                    if debit > 0:
+                        amount = -debit
+                    elif credit > 0:
+                        amount = credit
+                    else:
+                        continue
+
+                    month = get_month(desc_cell, date_str)
+                    year  = date_str[-4:] if date_str else ""
+                    week  = get_week(date_str)
+
+                    rows.append([year, str(month), str(week), date_str,
+                                 fmt_amount(amount), str(month), account,
+                                 get_article(desc_cell, amount), desc_cell, "", ""])
+
+    return rows, account, closing_balance
+
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
@@ -502,6 +591,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
                 rows, account, closing_balance = process_kaspi_gold_pdf(file_bytes)
+            elif "Народный Банк" in first_page_text or "Halyk" in first_page_text or "HSBKKZKX" in first_page_text:
+                rows, account, closing_balance = process_halyk_pdf(file_bytes)
             elif "ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text or "KZ44856" in first_page_text or "KZ03856" in first_page_text or "KZ50856" in first_page_text:
                 rows, account, closing_balance = process_bcc_pdf(file_bytes)
             else:
