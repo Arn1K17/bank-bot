@@ -207,7 +207,7 @@ def ask_ai(question: str) -> str:
         }
 
         payload = {
-            "model": "google/gemma-3-27b-it:free",
+            "model": "nvidia/nemotron-3-super-120b-a12b:free",
             "messages": [
                 {"role": "user", "content": prompt}
             ],
