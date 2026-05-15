@@ -687,41 +687,66 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_data = sheet.get_all_values()
 
         # Проверка дублей по ключу: дата + сумма + счёт
-        existing_keys = set()
-        for row in existing_data[1:]:
+        # Строим словарь: ключ -> номер строки в таблице (с учётом заголовка = строка 1)
+        existing_key_to_row = {}
+        for i, row in enumerate(existing_data[1:], start=2):  # строка 2 = первая после заголовка
             if len(row) >= 7:
-                existing_keys.add((row[3].strip(), row[4].strip(), row[6].strip()))
+                key = (row[3].strip(), row[4].strip(), row[6].strip())
+                existing_key_to_row[key] = i
 
-        dupe_rows = [
-            r for r in rows
-            if (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip()) in existing_keys
-        ]
+        existing_keys = set(existing_key_to_row.keys())
+
+        # Находим дубли и их номера строк в таблице
+        dupe_sheet_rows = []
+        dupe_rows = []
+        for r in rows:
+            key = (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip())
+            if key in existing_keys:
+                dupe_rows.append(r)
+                dupe_sheet_rows.append(existing_key_to_row[key])
+
         dupes = len(dupe_rows)
 
+        def format_row_ranges(row_nums):
+            """Превращает список номеров строк в диапазоны: [3,4,5,8,9] -> '3-5, 8-9'"""
+            if not row_nums:
+                return ""
+            sorted_nums = sorted(row_nums)
+            ranges = []
+            start = end = sorted_nums[0]
+            for n in sorted_nums[1:]:
+                if n == end + 1:
+                    end = n
+                else:
+                    ranges.append(f"{start}-{end}" if start != end else str(start))
+                    start = end = n
+            ranges.append(f"{start}-{end}" if start != end else str(start))
+            return ", ".join(ranges)
+
+        next_row = len(existing_data) + 1  # строка куда добавятся новые данные
+
         if dupes == len(rows):
-            # Группируем дубли по датам
-            dupe_dates = sorted(set(str(r[3]) for r in dupe_rows))
-            # Берём диапазон дат
-            date_range = f"{dupe_dates[0]} — {dupe_dates[-1]}" if len(dupe_dates) > 1 else dupe_dates[0]
+            dupe_range = format_row_ranges(dupe_sheet_rows)
             await update.message.reply_text(
                 f"⚠️ Этот файл уже был загружен ранее!\n"
                 f"Все {len(rows)} строк уже есть в таблице.\n"
-                f"Период: {date_range}\n"
+                f"Строки в таблице: {dupe_range}\n"
                 f"Ничего не добавлено."
             )
             return
 
         if dupes > 0:
-            dupe_dates = sorted(set(str(r[3]) for r in dupe_rows))
-            date_range = f"{dupe_dates[0]} — {dupe_dates[-1]}" if len(dupe_dates) > 1 else dupe_dates[0]
-            rows = [
+            dupe_range = format_row_ranges(dupe_sheet_rows)
+            new_rows = [
                 r for r in rows
                 if (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip()) not in existing_keys
             ]
+            new_range = format_row_ranges(list(range(next_row, next_row + len(new_rows))))
+            rows = new_rows
             await update.message.reply_text(
                 f"⚠️ {dupes} строк уже есть в таблице\n"
-                f"Период дублей: {date_range}\n"
-                f"Добавляю {len(rows)} новых строк..."
+                f"Дубли в строках: {dupe_range}\n"
+                f"Добавляю {len(rows)} новых → строки {new_range}"
             )
 
         sheet.append_rows(rows, value_input_option="RAW")
