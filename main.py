@@ -298,7 +298,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
             continue
         candidate = row[0].strip()
         score = _account_similarity(account_name, candidate)
-        logger.info(f"MATCH '{account_name}' vs '{candidate}' = {round(score,2)}")
         if score > best_score:
             best_score = score
             best_name = candidate
@@ -309,7 +308,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
                 best_balance = float(raw)
             except:
                 best_balance = None
-    logger.info(f"BEST for '{account_name}': '{best_name}' score={round(best_score,2)}")
     if best_score >= 0.4 and best_balance is not None:
         return best_name, best_balance
     return None, None
