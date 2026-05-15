@@ -303,9 +303,12 @@ def find_account_in_справка(account_name: str, справка_data: list)
             best_score = score
             best_name = candidate
             try:
-                best_balance = float(
-                    str(row[1]).replace(" ", "").replace(",", ".").replace("\xa0", "")
-                )
+            raw = str(row[1]).replace("\xa0", "").replace(" ", "").strip()
+            # убираем запятые-разделители тысяч: 1,460,254 -> 1460254
+            import re as _re
+            raw = _re.sub(r",(\d{3})(?=[\d,]|$)", r"\1", raw)
+            raw = raw.replace(",", ".")
+            best_balance = float(raw)
             except:
                 best_balance = None
     logger.info(f"BEST for '{account_name}': '{best_name}' score={round(best_score,2)}")  # <- новая
