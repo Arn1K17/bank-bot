@@ -725,14 +725,37 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         next_row = len(existing_data) + 1  # строка куда добавятся новые данные
 
+        def build_balance_msg(account, closing_balance):
+            """Строит сообщение со сверкой остатка."""
+            msg = ""
+            if closing_balance is not None:
+                dds_balance, bank_balance, error = check_balance(account, closing_balance)
+                if error:
+                    msg += f"\n⚠️ Сверка: {error}"
+                else:
+                    diff = round(bank_balance - dds_balance, 2)
+                    if abs(diff) < 1:
+                        msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
+                    else:
+                        msg += f"\n❌ Остаток НЕ сходится!\n"
+                        msg += f"Банк: {bank_balance:,.2f} ₸\n"
+                        msg += f"ДДС: {dds_balance:,.2f} ₸\n"
+                        msg += f"Разница: {diff:,.2f} ₸"
+            else:
+                msg += "\n⚠️ Исходящий остаток не найден в файле"
+            return msg
+
         if dupes == len(rows):
             dupe_range = format_row_ranges(dupe_sheet_rows)
-            await update.message.reply_text(
+            msg = (
                 f"⚠️ Этот файл уже был загружен ранее!\n"
                 f"Все {len(rows)} строк уже есть в таблице.\n"
                 f"Строки в таблице: {dupe_range}\n"
                 f"Ничего не добавлено."
             )
+            msg += build_balance_msg(account, closing_balance)
+            msg += f"\n\n🔗 {SPREADSHEET_URL}"
+            await update.message.reply_text(msg)
             return
 
         if dupes > 0:
@@ -752,23 +775,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet.append_rows(rows, value_input_option="RAW")
 
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
-
-        if closing_balance is not None:
-            dds_balance, bank_balance, error = check_balance(account, closing_balance)
-            if error:
-                msg += f"\n⚠️ Сверка: {error}"
-            else:
-                diff = round(bank_balance - dds_balance, 2)
-                if abs(diff) < 1:
-                    msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
-                else:
-                    msg += f"\n❌ Остаток НЕ сходится!\n"
-                    msg += f"Банк: {bank_balance:,.2f} ₸\n"
-                    msg += f"ДДС: {dds_balance:,.2f} ₸\n"
-                    msg += f"Разница: {diff:,.2f} ₸"
-        else:
-            msg += "\n⚠️ Исходящий остаток не найден в файле"
-
+        msg += build_balance_msg(account, closing_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
 
