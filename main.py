@@ -305,7 +305,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
             try:
             raw = str(row[1]).replace("\xa0", "").replace(" ", "").strip()
             # убираем запятые-разделители тысяч: 1,460,254 -> 1460254
-            import re as _re
             raw = _re.sub(r",(\d{3})(?=[\d,]|$)", r"\1", raw)
             raw = raw.replace(",", ".")
             best_balance = float(raw)
