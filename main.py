@@ -298,7 +298,7 @@ def find_account_in_справка(account_name: str, справка_data: list)
             continue
         candidate = row[0].strip()
         score = _account_similarity(account_name, candidate)
-        if score > best_score:
+        logger.info(f"MATCH '{account_name}' vs '{candidate}' = {round(score,2)}")
             best_score = score
             best_name = candidate
             try:
