@@ -207,7 +207,7 @@ def ask_ai(question: str) -> str:
         }
 
         payload = {
-            "model": "deepseek/deepseek-v4-flash:free",
+            "model": "google/gemini-2.0-flash-exp:free",
             "messages": [
                 {"role": "user", "content": prompt}
             ],
