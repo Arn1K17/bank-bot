@@ -203,7 +203,7 @@ def ask_ai(question: str) -> str:
         }
 
         payload = {
-            "model": "meta-llama/llama-3.1-8b-instruct:free",
+            "model": "deepseek/deepseek-v4-flash:free",
             "messages": [
                 {"role": "user", "content": prompt}
             ],
