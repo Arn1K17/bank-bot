@@ -241,9 +241,16 @@ def process_kaspi_gold_pdf(file_bytes):
         first_text = pdf.pages[0].extract_text() or ""
 
         # "Доступно на 12.05.26: + 173 416,82 ₸"
-        m = re.search(r"Доступно на \d{2}\.\d{2}\.\d{2,4}[:\s]+\+?\s*([\d\s,]+)\s*₸", first_text)
-        if m:
-            closing_balance = parse_num(m.group(1))
+        m = re.search(r"₸\s*([\d\s]+,\d{2})", first_text)
+if m:
+    closing_balance = parse_num(m.group(1))
+if not closing_balance:
+    for page in pdf.pages:
+        t = page.extract_text() or ""
+        m2 = re.search(r"Доступно на \d{2}\.\d{2}[\.\d]*[:\s]+\+?\s*([\d\s,]+)\s*₸", t)
+        if m2:
+            closing_balance = parse_num(m2.group(1))
+            break
 
         # Также ищем IBAN если есть
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
