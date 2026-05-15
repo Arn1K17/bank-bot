@@ -186,7 +186,7 @@ def ask_ai(question: str) -> str:
         sheets_data = get_sheets_data_for_ai()
 
         today = datetime.now().strftime("%d.%m.%Y")
-prompt = f"""Ты финансовый помощник компании. Сегодня {today}.
+        prompt = f"""Ты финансовый помощник компании. Сегодня {today}.
 
 {sheets_data}
 
