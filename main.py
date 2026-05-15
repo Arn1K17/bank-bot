@@ -49,8 +49,8 @@ def get_sheet():
 def format_date(val):
     if isinstance(val, datetime):
         return val.strftime("%d/%m/%Y")
-    s = str(val).strip()
-    m = re.match(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", s)
+    s = str(val).replace("\n", "").strip()
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", s)
     if m:
         d, mo, y = m.group(1), m.group(2), m.group(3)
         if len(y) == 2:
@@ -123,11 +123,8 @@ def parse_num(s):
 
 # ============ СВЕРКА ОСТАТКОВ ============
 def check_balance(account_name, bank_closing_balance):
-    """Сверяет остаток из банка с ДДС таблицей"""
     try:
         spreadsheet = get_spreadsheet()
-
-        # Берём начальный остаток из Счета2026(Справка)
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
 
@@ -143,12 +140,11 @@ def check_balance(account_name, bank_closing_balance):
         if initial_balance is None:
             return None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
-        # Суммируем все операции в Реестре по этому счету
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
 
         total_operations = 0.0
-        for row in реестр_data[1:]:  # пропускаем заголовок
+        for row in реестр_data[1:]:
             if len(row) >= 7 and row[6].strip() == account_name.strip():
                 try:
                     total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
@@ -157,7 +153,6 @@ def check_balance(account_name, bank_closing_balance):
 
         dds_balance = round(initial_balance + total_operations, 2)
         bank_balance = round(bank_closing_balance, 2)
-
         return dds_balance, bank_balance, None
     except Exception as e:
         return None, None, str(e)
@@ -172,12 +167,10 @@ def process_xlsx(file_bytes):
     iban = str(cell_val(ws.cell(row=3, column=3))).strip()
     account = IBAN_MAP.get(iban, iban)
 
-    # Ищем исходящий остаток
     for row_idx in range(1, ws.max_row + 1):
         for col_idx in range(1, ws.max_column + 1):
             cell = str(cell_val(ws.cell(row=row_idx, column=col_idx))).lower()
             if "исходящ" in cell and "сальдо" in cell:
-                # Берём следующую ячейку или ищем число в строке
                 for c in range(col_idx + 1, min(col_idx + 5, ws.max_column + 1)):
                     v = cell_val(ws.cell(row=row_idx, column=c))
                     if v:
@@ -237,10 +230,8 @@ def process_kaspi_gold_pdf(file_bytes):
     closing_balance = None
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        # Ищем исходящий остаток в тексте первой страницы
         first_text = pdf.pages[0].extract_text() or ""
 
-        # "Доступно на 12.05.26: + 173 416,82 ₸"
         m = re.search(r"₸\s*([\d\s]+,\d{2})", first_text)
         if m:
             closing_balance = parse_num(m.group(1))
@@ -252,7 +243,6 @@ def process_kaspi_gold_pdf(file_bytes):
                     closing_balance = parse_num(m2.group(1))
                     break
 
-        # Также ищем IBAN если есть
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
         if m_iban:
             iban = m_iban.group(1).strip()
@@ -306,19 +296,20 @@ def process_bcc_pdf(file_bytes):
     closing_balance = None
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        first_text = pdf.pages[0].extract_text() or ""
-
-        m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", first_text)
-        if m:
-            iban = m.group(1).strip()
-            account = IBAN_MAP.get(iban, iban)
-
-        # Ищем исходящее сальдо во всём тексте
         full_text = ""
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
-        m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s,]+)", full_text)
+        # IBAN
+        m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
+        if m:
+            iban = m.group(1).strip()
+            account = IBAN_MAP.get(iban, iban)
+
+        # Исходящее сальдо — ищем казахский и русский варианты
+        m_bal = re.search(r"[Шш]ығыс сальдо[^:]*?:\s*([\d\s]+,\d{2})", full_text)
+        if not m_bal:
+            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+,\d{2})", full_text)
         if m_bal:
             closing_balance = parse_num(m_bal.group(1))
 
@@ -329,16 +320,18 @@ def process_bcc_pdf(file_bytes):
                     if not row or len(row) < 12:
                         continue
 
+                    # Дата в колонке [1] — склеиваем перенос строки
                     date_cell = str(row[1] or "").replace("\n", "").strip()
-                    debit_cell = str(row[7] or "").strip()
-                    credit_cell = str(row[8] or "").strip()
+                    debit_cell = str(row[7] or "").replace("\n", "").strip()
+                    credit_cell = str(row[8] or "").replace("\n", "").strip()
                     desc_cell = str(row[11] or "").replace("\n", " ").strip()
 
-                    date_m = re.search(r"\d{2}\.\d{2}\.\d{4}", date_cell)
+                    # Ищем дату в формате DD.MM.YYYY внутри строки
+                    date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", date_cell)
                     if not date_m:
                         continue
 
-                    date_str = format_date(date_m.group())
+                    date_str = f"{int(date_m.group(1)):02d}/{date_m.group(2)}/{date_m.group(3)}"
                     debit = parse_num(debit_cell)
                     credit = parse_num(credit_cell)
 
@@ -385,7 +378,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
                 rows, account, closing_balance = process_kaspi_gold_pdf(file_bytes)
-            elif "ЦентрКредит" in first_page_text or "KZ44856" in first_page_text:
+            elif "ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text or "KZ44856" in first_page_text or "KZ03856" in first_page_text or "KZ50856" in first_page_text:
                 rows, account, closing_balance = process_bcc_pdf(file_bytes)
             else:
                 rows, account, closing_balance = process_kaspi_gold_pdf(file_bytes)
@@ -397,10 +390,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet = get_sheet()
         sheet.append_rows(rows, value_input_option="RAW")
 
-        # Базовое сообщение
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
 
-        # Сверка остатков
         if closing_balance is not None:
             dds_balance, bank_balance, error = check_balance(account, closing_balance)
             if error:
@@ -418,7 +409,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "\n⚠️ Исходящий остаток не найден в файле"
 
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
-
         await update.message.reply_text(msg)
 
     except Exception as e:
