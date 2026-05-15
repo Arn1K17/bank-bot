@@ -302,12 +302,11 @@ def find_account_in_справка(account_name: str, справка_data: list)
         if score > best_score:
             best_score = score
             best_name = candidate
-            try:
-            raw = str(row[1]).replace("\xa0", "").replace(" ", "").strip()
-            # убираем запятые-разделители тысяч: 1,460,254 -> 1460254
-            raw = _re.sub(r",(\d{3})(?=[\d,]|$)", r"\1", raw)
-            raw = raw.replace(",", ".")
-            best_balance = float(raw)
+                try:
+                    raw = str(row[1]).replace("\xa0", "").replace(" ", "").strip()
+                    raw = re.sub(r",(\d{3})(?=[\d,]|$)", r"\1", raw)
+                    raw = raw.replace(",", ".")
+                    best_balance = float(raw)
             except:
                 best_balance = None
     logger.info(f"BEST for '{account_name}': '{best_name}' score={round(best_score,2)}")  # <- новая
