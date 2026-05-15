@@ -207,7 +207,7 @@ def ask_ai(question: str) -> str:
         }
 
         payload = {
-            "model": "mistralai/mistral-7b-instruct:free",
+            "model": "google/gemma-4-27b-it:free",
             "messages": [
                 {"role": "user", "content": prompt}
             ],
