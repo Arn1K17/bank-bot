@@ -21,6 +21,8 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+WEBHOOK_URL = "https://bank-bot-w89l.onrender.com"
+PORT = int(os.getenv("PORT", "10000"))
 
 IBAN_MAP = {
     "KZ81722S000020084562": "Каспи Имангазиева Зухра",
@@ -537,7 +539,13 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle))
     app.add_handler(MessageHandler(filters.TEXT, handle))
     logger.info("Bot started!")
-    app.run_polling(drop_pending_updates=True)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"{WEBHOOK_URL}/webhook",
+        url_path="webhook",
+        drop_pending_updates=True,
+    )
 
 if __name__ == "__main__":
     main()
