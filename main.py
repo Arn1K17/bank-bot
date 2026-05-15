@@ -189,8 +189,6 @@ def ask_ai(question: str) -> str:
         today = datetime.now().strftime("%d.%m.%Y")
         prompt = f"""Ты финансовый помощник компании. Сегодня {today}.
 
-Ты умеешь читать банковские выписки следующих банков: Каспи Pay (xlsx), Каспи Gold (pdf), Народный Банк / Халык (pdf), БЦК / ЦентрКредит (pdf). Для сверки остатков используешь формулу: ДДС остаток = начальный остаток + все операции по счёту, затем сравниваешь с исходящим остатком банка.
-
 {sheets_data}
 
 Отвечай на русском языке, кратко и понятно. Используй цифры из данных выше.
@@ -694,26 +692,36 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(row) >= 7:
                 existing_keys.add((row[3].strip(), row[4].strip(), row[6].strip()))
 
-        dupes = sum(
-            1 for r in rows
+        dupe_rows = [
+            r for r in rows
             if (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip()) in existing_keys
-        )
+        ]
+        dupes = len(dupe_rows)
 
         if dupes == len(rows):
+            # Группируем дубли по датам
+            dupe_dates = sorted(set(str(r[3]) for r in dupe_rows))
+            # Берём диапазон дат
+            date_range = f"{dupe_dates[0]} — {dupe_dates[-1]}" if len(dupe_dates) > 1 else dupe_dates[0]
             await update.message.reply_text(
                 f"⚠️ Этот файл уже был загружен ранее!\n"
-                f"Все {len(rows)} строк уже есть в таблице. Ничего не добавлено."
+                f"Все {len(rows)} строк уже есть в таблице.\n"
+                f"Период: {date_range}\n"
+                f"Ничего не добавлено."
             )
             return
 
         if dupes > 0:
+            dupe_dates = sorted(set(str(r[3]) for r in dupe_rows))
+            date_range = f"{dupe_dates[0]} — {dupe_dates[-1]}" if len(dupe_dates) > 1 else dupe_dates[0]
             rows = [
                 r for r in rows
                 if (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip()) not in existing_keys
             ]
             await update.message.reply_text(
-                f"⚠️ {dupes} строк уже есть в таблице — пропускаю дубли.\n"
-                f"Добавляю {len(rows)} новых..."
+                f"⚠️ {dupes} строк уже есть в таблице\n"
+                f"Период дублей: {date_range}\n"
+                f"Добавляю {len(rows)} новых строк..."
             )
 
         sheet.append_rows(rows, value_input_option="RAW")
