@@ -220,7 +220,7 @@ def ask_ai(question: str) -> str:
         )
         resp.raise_for_status()
         result = resp.json()
-        text = result["choices"][0]["message"]["content"]
+        text = result["choices"][0]["message"].get("content") or result["choices"][0]["message"].get("reasoning") or "Нет ответа"
         return text.strip()
     except Exception as e:
         logger.error(f"OpenRouter error: {e}")
