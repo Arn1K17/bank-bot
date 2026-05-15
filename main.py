@@ -201,7 +201,7 @@ def ask_ai(question: str) -> str:
         }
 
         payload = {
-            "model": "meta-llama/llama-3.1-8b-instruct:free",
+            "model": "mistralai/mistral-7b-instruct:free",
             "messages": [
                 {"role": "user", "content": prompt}
             ],
@@ -213,7 +213,8 @@ def ask_ai(question: str) -> str:
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=30
+            timeout=30,
+            verify=True
         )
         resp.raise_for_status()
         result = resp.json()
