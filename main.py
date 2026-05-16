@@ -139,6 +139,34 @@ def parse_num(s):
     except:
         return 0
 
+def parse_справка_num(s):
+    """Парсинг чисел из Справки — формат может быть 1,460,254 или 1460254 или 1 460 254"""
+    s = str(s or "").strip()
+    s = s.replace("\xa0", "").replace(" ", "")
+    # Если формат 1,460,254 — убираем все запятые кроме последней если она дробная
+    # Считаем запятые
+    comma_count = s.count(",")
+    dot_count = s.count(".")
+    if comma_count > 1:
+        # Формат 1,460,254 — запятые как разделитель тысяч
+        s = s.replace(",", "")
+    elif comma_count == 1 and dot_count == 0:
+        # Может быть 1460,254 (дробная) или 1,460 (тысячи)
+        parts = s.split(",")
+        if len(parts[1]) == 3 and len(parts[0]) <= 3:
+            # Скорее всего тысячи: 1,460
+            s = s.replace(",", "")
+        else:
+            # Дробная часть
+            s = s.replace(",", ".")
+    elif dot_count > 1:
+        # Формат 1.460.254 — точки как разделитель тысяч
+        s = s.replace(".", "")
+    try:
+        return float(s)
+    except:
+        return None
+
 def make_row(date_str, amount, account, desc):
     """Год/Месяц/Неделя — из даты оплаты. Месяц начисления — из описания."""
     year = get_year_from_date(date_str)
@@ -303,18 +331,27 @@ def _account_similarity(name_a: str, name_b: str) -> float:
     return score
 
 def find_account_in_справка(account_name: str, справка_data: list):
-    # Сначала точное совпадение
+    """Ищет счёт в Справке. Сначала точное совпадение (без учёта регистра), потом нечёткое."""
+    search = account_name.strip().lower()
+
+    # Логируем все названия для отладки
+    all_names = [row[0].strip() for row in справка_data if row and row[0].strip()]
+    logger.info(f"Ищем счёт: '{account_name}' | Все счета в справке: {all_names}")
+
+    # 1. Точное совпадение без учёта регистра
     for row in справка_data:
         if not row or not row[0].strip():
             continue
-        if row[0].strip() == account_name.strip():
-            try:
-                balance = float(str(row[1]).replace(" ", "").replace(",", ".").replace("\xa0", ""))
-                return row[0].strip(), balance
-            except:
-                pass
+        candidate = row[0].strip()
+        if candidate.lower() == search:
+            balance = parse_справка_num(row[1] if len(row) > 1 else "")
+            if balance is not None:
+                logger.info(f"Найдено точное совпадение: '{candidate}' = {balance}")
+                return candidate, balance
+            else:
+                logger.warning(f"Счёт '{candidate}' найден, но баланс не распознан: '{row[1]}'")
 
-    # Если не нашли точно — нечёткий поиск
+    # 2. Нечёткий поиск
     best_name = None
     best_balance = None
     best_score = 0.0
@@ -326,39 +363,57 @@ def find_account_in_справка(account_name: str, справка_data: list)
         if score > best_score:
             best_score = score
             best_name = candidate
-            try:
-                best_balance = float(
-                    str(row[1]).replace(" ", "").replace(",", ".").replace("\xa0", "")
-                )
-            except:
-                best_balance = None
+            best_balance = parse_справка_num(row[1] if len(row) > 1 else "")
+
+    logger.info(f"Нечёткий поиск: лучший '{best_name}' score={best_score:.2f} balance={best_balance}")
+
     if best_score >= 0.4 and best_balance is not None:
         return best_name, best_balance
+
     return None, None
 
 def check_balance(account_name, bank_closing_balance):
+    """
+    Сверка остатка:
+    Начальный остаток (Справка) + все операции по счёту (Реестр) = остаток ДДС
+    Сравниваем с исходящим остатком из выписки (bank_closing_balance)
+    """
     try:
         spreadsheet = get_spreadsheet()
+
+        # Читаем начальный остаток из Справки
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
+
         if initial_balance is None:
             return None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
+
+        # Считаем сумму всех операций по счёту из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
         total_operations = 0.0
         for row in реестр_data[1:]:
             if len(row) >= 7:
-                row_acc = row[6].strip()
-                if row_acc == account_name.strip() or row_acc == matched_name:
+                row_acc = row[6].strip().lower()
+                if row_acc == account_name.strip().lower() or row_acc == matched_name.lower():
                     try:
                         total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
                     except:
                         pass
+
         dds_balance = round(initial_balance + total_operations, 2)
         bank_balance = round(bank_closing_balance, 2)
+
+        logger.info(
+            f"Сверка '{account_name}': начальный={initial_balance}, "
+            f"операции={total_operations}, ДДС={dds_balance}, банк={bank_balance}"
+        )
+
         return dds_balance, bank_balance, None
+
     except Exception as e:
+        logger.error(f"check_balance error: {e}")
         return None, None, str(e)
 
 # ============ XLSX ============
@@ -725,7 +780,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Добавляю {len(rows)} новых → строки {new_range}"
             )
 
-        # Сортировка по дате (от старых к новым) перед добавлением
+        # Сортировка по дате (от старых к новым)
         rows.sort(key=lambda r: datetime.strptime(r[3], "%d/%m/%Y") if r[3] else datetime.min)
 
         # Сначала записываем в таблицу
