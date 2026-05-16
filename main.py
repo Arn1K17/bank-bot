@@ -76,7 +76,6 @@ def get_month_from_date(date_str):
         return ""
 
 def get_month_nachislenia(desc, date_str):
-    """Месяц начисления — из описания операции"""
     if desc:
         m = re.search(r"\d{1,2}[./]\d{1,2}[./]\d{2,4}", str(desc))
         if m:
@@ -140,27 +139,24 @@ def parse_num(s):
         return 0
 
 def parse_справка_num(s):
-    """Парсинг чисел из Справки — формат может быть 1,460,254 или 1460254 или 1 460 254"""
+    """Парсинг чисел из Справки — формат 1,460,254 или 1460254 или 1 460 254"""
     s = str(s or "").strip()
     s = s.replace("\xa0", "").replace(" ", "")
-    # Если формат 1,460,254 — убираем все запятые кроме последней если она дробная
-    # Считаем запятые
     comma_count = s.count(",")
     dot_count = s.count(".")
     if comma_count > 1:
-        # Формат 1,460,254 — запятые как разделитель тысяч
+        # 1,460,254 — запятые как разделитель тысяч
         s = s.replace(",", "")
     elif comma_count == 1 and dot_count == 0:
-        # Может быть 1460,254 (дробная) или 1,460 (тысячи)
         parts = s.split(",")
         if len(parts[1]) == 3 and len(parts[0]) <= 3:
-            # Скорее всего тысячи: 1,460
+            # 1,460 — тысячи
             s = s.replace(",", "")
         else:
-            # Дробная часть
+            # дробная часть
             s = s.replace(",", ".")
     elif dot_count > 1:
-        # Формат 1.460.254 — точки как разделитель тысяч
+        # 1.460.254 — точки как разделитель тысяч
         s = s.replace(".", "")
     try:
         return float(s)
@@ -168,7 +164,6 @@ def parse_справка_num(s):
         return None
 
 def make_row(date_str, amount, account, desc):
-    """Год/Месяц/Неделя — из даты оплаты. Месяц начисления — из описания."""
     year = get_year_from_date(date_str)
     month_oplaty = get_month_from_date(date_str)
     week = get_week(date_str)
@@ -331,12 +326,8 @@ def _account_similarity(name_a: str, name_b: str) -> float:
     return score
 
 def find_account_in_справка(account_name: str, справка_data: list):
-    """Ищет счёт в Справке. Сначала точное совпадение (без учёта регистра), потом нечёткое."""
     search = account_name.strip().lower()
-
-    # Логируем все названия для отладки
-    all_names = [row[0].strip() for row in справка_data if row and row[0].strip()]
-    logger.info(f"Ищем счёт: '{account_name}' | Все счета в справке: {all_names}")
+    logger.info(f"Ищем счёт: '{account_name}'")
 
     # 1. Точное совпадение без учёта регистра
     for row in справка_data:
@@ -346,10 +337,8 @@ def find_account_in_справка(account_name: str, справка_data: list)
         if candidate.lower() == search:
             balance = parse_справка_num(row[1] if len(row) > 1 else "")
             if balance is not None:
-                logger.info(f"Найдено точное совпадение: '{candidate}' = {balance}")
+                logger.info(f"Найдено: '{candidate}' = {balance}")
                 return candidate, balance
-            else:
-                logger.warning(f"Счёт '{candidate}' найден, но баланс не распознан: '{row[1]}'")
 
     # 2. Нечёткий поиск
     best_name = None
@@ -365,23 +354,21 @@ def find_account_in_справка(account_name: str, справка_data: list)
             best_name = candidate
             best_balance = parse_справка_num(row[1] if len(row) > 1 else "")
 
-    logger.info(f"Нечёткий поиск: лучший '{best_name}' score={best_score:.2f} balance={best_balance}")
+    logger.info(f"Нечёткий: '{best_name}' score={best_score:.2f} balance={best_balance}")
 
     if best_score >= 0.4 and best_balance is not None:
         return best_name, best_balance
 
     return None, None
 
-def check_balance(account_name, bank_closing_balance):
+def check_balance(account_name, bank_closing_balance, current_rows):
     """
-    Сверка остатка:
-    Начальный остаток (Справка) + все операции по счёту (Реестр) = остаток ДДС
-    Сравниваем с исходящим остатком из выписки (bank_closing_balance)
+    Сверка:
+    Начальный остаток (Справка) + сумма операций из ТЕКУЩЕЙ выписки = остаток ДДС
+    Сравниваем с исходящим остатком из банка (bank_closing_balance)
     """
     try:
         spreadsheet = get_spreadsheet()
-
-        # Читаем начальный остаток из Справки
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
@@ -389,25 +376,20 @@ def check_balance(account_name, bank_closing_balance):
         if initial_balance is None:
             return None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
-        # Считаем сумму всех операций по счёту из реестра
-        реестр = spreadsheet.worksheet(SHEET_NAME)
-        реестр_data = реестр.get_all_values()
+        # Сумма только из текущей выписки
         total_operations = 0.0
-        for row in реестр_data[1:]:
-            if len(row) >= 7:
-                row_acc = row[6].strip().lower()
-                if row_acc == account_name.strip().lower() or row_acc == matched_name.lower():
-                    try:
-                        total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
-                    except:
-                        pass
+        for r in current_rows:
+            try:
+                total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
+            except:
+                pass
 
         dds_balance = round(initial_balance + total_operations, 2)
         bank_balance = round(bank_closing_balance, 2)
 
         logger.info(
             f"Сверка '{account_name}': начальный={initial_balance}, "
-            f"операции={total_operations}, ДДС={dds_balance}, банк={bank_balance}"
+            f"операции={total_operations:.2f}, ДДС={dds_balance}, банк={bank_balance}"
         )
 
         return dds_balance, bank_balance, None
@@ -734,10 +716,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         next_row = len(existing_data) + 1
 
-        def build_balance_msg(account, closing_balance):
+        def build_balance_msg(account, closing_balance, current_rows):
             msg = ""
             if closing_balance is not None:
-                dds_balance, bank_balance, error = check_balance(account, closing_balance)
+                dds_balance, bank_balance, error = check_balance(account, closing_balance, current_rows)
                 if error:
                     msg += f"\n⚠️ Сверка: {error}"
                 else:
@@ -761,7 +743,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Строки в таблице: {dupe_range}\n"
                 f"Ничего не добавлено."
             )
-            msg += build_balance_msg(account, closing_balance)
+            msg += build_balance_msg(account, closing_balance, rows)
             msg += f"\n\n🔗 {SPREADSHEET_URL}"
             await update.message.reply_text(msg)
             return
@@ -783,12 +765,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Сортировка по дате (от старых к новым)
         rows.sort(key=lambda r: datetime.strptime(r[3], "%d/%m/%Y") if r[3] else datetime.min)
 
-        # Сначала записываем в таблицу
+        # Записываем в таблицу
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
-        # Потом сверяем — уже с учётом новых данных
+        # Сверка — начальный остаток из Справки + сумма текущей выписки
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
-        msg += build_balance_msg(account, closing_balance)
+        msg += build_balance_msg(account, closing_balance, rows)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
 
