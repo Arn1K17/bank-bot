@@ -772,7 +772,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Добавляю {len(rows)} новых → строки {new_range}"
             )
 
-        sheet.append_rows(rows, value_input_option="RAW")
+        sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
         msg += build_balance_msg(account, closing_balance)
