@@ -716,6 +716,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Операции не найдены в файле")
             return
 
+        all_rows = rows  # сохраняем все строки для сверки
+
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
 
@@ -760,7 +762,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Строки в таблице: {dupe_range}\n"
                 f"Ничего не добавлено."
             )
-            msg += build_balance_msg(account, closing_balance, rows, opening_balance)
+            msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
             msg += f"\n\n🔗 {SPREADSHEET_URL}"
             await update.message.reply_text(msg)
             return
@@ -784,7 +786,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
-        msg += build_balance_msg(account, closing_balance, rows, opening_balance)
+        msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
 
