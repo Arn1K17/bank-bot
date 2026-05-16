@@ -35,7 +35,7 @@ IBAN_MAP = {
     "KZ97722C000015235365": "Арман каспи голд",
     "KZ038562204137753855": "БЦК Имангазиева",
     "KZ448562204152575978": "БЦК Ип Серик",
-    "KZ03601A231012849031": "Халык ИП Серик",
+    "KZ03601A231012849031": "Народный банк Ип Серик",
 }
 
 def get_spreadsheet():
@@ -64,21 +64,19 @@ def format_date(val):
     return s
 
 def get_year_from_date(date_str):
-    """Год из даты оплаты"""
     try:
         return date_str.split("/")[2]
     except:
         return ""
 
 def get_month_from_date(date_str):
-    """Месяц из даты оплаты"""
     try:
         return int(date_str.split("/")[1])
     except:
         return ""
 
 def get_month_nachislenia(desc, date_str):
-    """Месяц начисления — из описания операции (как было раньше)"""
+    """Месяц начисления — из описания операции"""
     if desc:
         m = re.search(r"\d{1,2}[./]\d{1,2}[./]\d{2,4}", str(desc))
         if m:
@@ -142,25 +140,21 @@ def parse_num(s):
         return 0
 
 def make_row(date_str, amount, account, desc):
-    """
-    Формирует строку реестра:
-    - Год, Месяц оплаты, Неделя — из даты оплаты
-    - Месяц начисления — из описания операции
-    """
+    """Год/Месяц/Неделя — из даты оплаты. Месяц начисления — из описания."""
     year = get_year_from_date(date_str)
     month_oplaty = get_month_from_date(date_str)
     week = get_week(date_str)
     month_nachislenia = get_month_nachislenia(desc, date_str)
     return [
-        year,                       # Год (из даты оплаты)
-        str(month_oplaty),          # Месяц оплаты (из даты оплаты)
-        str(week),                  # Неделя (из даты оплаты)
-        date_str,                   # Дата
-        fmt_amount(amount),         # Сумма
-        str(month_nachislenia),     # Месяц начисления (из описания)
-        account,                    # Счёт
-        get_article(desc, amount),  # Статья
-        desc,                       # Описание
+        year,
+        str(month_oplaty),
+        str(week),
+        date_str,
+        fmt_amount(amount),
+        str(month_nachislenia),
+        account,
+        get_article(desc, amount),
+        desc,
         "",
         ""
     ]
@@ -309,6 +303,18 @@ def _account_similarity(name_a: str, name_b: str) -> float:
     return score
 
 def find_account_in_справка(account_name: str, справка_data: list):
+    # Сначала точное совпадение
+    for row in справка_data:
+        if not row or not row[0].strip():
+            continue
+        if row[0].strip() == account_name.strip():
+            try:
+                balance = float(str(row[1]).replace(" ", "").replace(",", ".").replace("\xa0", ""))
+                return row[0].strip(), balance
+            except:
+                pass
+
+    # Если не нашли точно — нечёткий поиск
     best_name = None
     best_balance = None
     best_score = 0.0
@@ -535,7 +541,7 @@ def parse_kz_num(s):
 
 def process_halyk_pdf(file_bytes):
     rows = []
-    account = "Халык ИП Серик"
+    account = "Народный банк Ип Серик"
     closing_balance = None
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -639,6 +645,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
 
+        # Проверка дублей
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
             if len(row) >= 7:
@@ -718,8 +725,13 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Добавляю {len(rows)} новых → строки {new_range}"
             )
 
+        # Сортировка по дате (от старых к новым) перед добавлением
         rows.sort(key=lambda r: datetime.strptime(r[3], "%d/%m/%Y") if r[3] else datetime.min)
 
+        # Сначала записываем в таблицу
+        sheet.append_rows(rows, value_input_option="USER_ENTERED")
+
+        # Потом сверяем — уже с учётом новых данных
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
         msg += build_balance_msg(account, closing_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
