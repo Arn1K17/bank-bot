@@ -158,23 +158,23 @@ def parse_справка_num(s):
     except:
         return None
 
-def make_row(date_str, amount, account, desc):
+def make_row(date_str, amount, account, desc, supplier=""):
     year = get_year_from_date(date_str)
     month_oplaty = get_month_from_date(date_str)
     week = get_week(date_str)
     month_nachislenia = get_month_nachislenia(desc, date_str)
     return [
-        year,
-        str(month_oplaty),
-        str(week),
-        date_str,
-        fmt_amount(amount),
-        str(month_nachislenia),
-        account,
-        get_article(desc, amount),
-        desc,
-        "",
-        ""
+        year,                       # колонка 1  - Год
+        str(month_oplaty),          # колонка 2  - Месяц оплаты
+        str(week),                  # колонка 3  - Неделя
+        date_str,                   # колонка 4  - Дата
+        fmt_amount(amount),         # колонка 5  - Сумма
+        str(month_nachislenia),     # колонка 6  - Месяц начисления
+        account,                    # колонка 7  - Счет
+        get_article(desc, amount),  # колонка 8  - Статья
+        desc,                       # колонка 9  - Назначение платежа
+        "",                         # колонка 10 - (пустая)
+        str(supplier) if supplier else "",  # колонка 11 - Поставщик
     ]
 
 # ============ OPENROUTER AI ============
@@ -355,13 +355,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
     return None, None
 
 def check_balance(account_name, bank_closing_balance, current_rows, opening_balance=None):
-    """
-    Сверка:
-    - Если есть входящий остаток из выписки — используем его
-    - Иначе берём начальный остаток из Счета2026(Справка)
-    Входящий остаток + сумма операций из текущей выписки = остаток ДДС
-    Сравниваем с исходящим остатком из банка
-    """
     try:
         if opening_balance is not None:
             initial_balance = opening_balance
@@ -484,6 +477,8 @@ def process_xlsx(file_bytes):
         date_val = cell_val(ws.cell(row=row_idx, column=2))
         debit = cell_val(ws.cell(row=row_idx, column=3))
         credit = cell_val(ws.cell(row=row_idx, column=4))
+        # Колонка 5 — Наименование бенефициара / отправителя → Поставщик (без изменений)
+        supplier = str(cell_val(ws.cell(row=row_idx, column=5)) or "")
         desc = str(cell_val(ws.cell(row=row_idx, column=9)))
         if not date_val:
             continue
@@ -504,7 +499,7 @@ def process_xlsx(file_bytes):
                 continue
         else:
             continue
-        rows.append(make_row(date_str, amount, account, desc))
+        rows.append(make_row(date_str, amount, account, desc, supplier))
 
     return rows, account, closing_balance, opening_balance
 
