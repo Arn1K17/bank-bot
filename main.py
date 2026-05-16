@@ -164,17 +164,17 @@ def make_row(date_str, amount, account, desc, supplier=""):
     week = get_week(date_str)
     month_nachislenia = get_month_nachislenia(desc, date_str)
     return [
-        year,                       # колонка 1  - Год
-        str(month_oplaty),          # колонка 2  - Месяц оплаты
-        str(week),                  # колонка 3  - Неделя
-        date_str,                   # колонка 4  - Дата
-        fmt_amount(amount),         # колонка 5  - Сумма
-        str(month_nachislenia),     # колонка 6  - Месяц начисления
-        account,                    # колонка 7  - Счет
-        get_article(desc, amount),  # колонка 8  - Статья
-        desc,                       # колонка 9  - Назначение платежа
-        "",                         # колонка 10 - (пустая)
-        str(supplier) if supplier else "",  # колонка 11 - Поставщик
+        year,                                          # колонка A - Год
+        str(month_oplaty),                             # колонка B - Месяц
+        str(week),                                     # колонка C - Неделя
+        date_str,                                      # колонка D - Дата
+        fmt_amount(amount),                            # колонка E - Сумма
+        str(month_nachislenia),                        # колонка F - Месяц начисления
+        account,                                       # колонка G - Счет
+        get_article(desc, amount),                     # колонка H - Статья
+        desc,                                          # колонка I - Примечание
+        "",                                            # колонка J - Подразделения
+        str(supplier) if supplier else "",             # колонка K - Поставщик
     ]
 
 # ============ OPENROUTER AI ============
@@ -477,7 +477,6 @@ def process_xlsx(file_bytes):
         date_val = cell_val(ws.cell(row=row_idx, column=2))
         debit = cell_val(ws.cell(row=row_idx, column=3))
         credit = cell_val(ws.cell(row=row_idx, column=4))
-        # Колонка 5 — Наименование бенефициара / отправителя → Поставщик (без изменений)
         supplier = str(cell_val(ws.cell(row=row_idx, column=5)) or "")
         desc = str(cell_val(ws.cell(row=row_idx, column=9)))
         if not date_val:
