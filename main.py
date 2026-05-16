@@ -718,7 +718,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Добавляю {len(rows)} новых → строки {new_range}"
             )
 
-        sheet.append_rows(rows, value_input_option="USER_ENTERED")
+        rows.sort(key=lambda r: datetime.strptime(r[3], "%d/%m/%Y") if r[3] else datetime.min)
 
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
         msg += build_balance_msg(account, closing_balance)
