@@ -715,7 +715,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ", ".join(ranges)
 
         next_row = len(existing_data) + 1
-
+        
         def build_balance_msg(account, closing_balance, current_rows):
             msg = ""
             if closing_balance is not None:
@@ -723,14 +723,31 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if error:
                     msg += f"\n⚠️ Сверка: {error}"
                 else:
+                    # Считаем сумму текущей выписки для отображения
+                    total_operations = 0.0
+                    for r in current_rows:
+                        try:
+                            total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
+                        except:
+                            pass
+        
+                    # Начальный остаток = ДДС - операции
+                    initial_balance = round(dds_balance - total_operations, 2)
+        
                     diff = round(bank_balance - dds_balance, 2)
                     if abs(diff) < 1:
                         msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
                     else:
                         msg += f"\n❌ Остаток НЕ сходится!\n"
                         msg += f"Банк: {bank_balance:,.2f} ₸\n"
-                        msg += f"ДДС: {dds_balance:,.2f} ₸\n"
-                        msg += f"Разница: {diff:,.2f} ₸"
+                        msg += f"ДДС:  {dds_balance:,.2f} ₸\n"
+                        msg += f"Разница: {diff:,.2f} ₸\n"
+        
+                    msg += f"\n📊 Расчёт ДДС:\n"
+                    msg += f"  Начальный остаток (Справка): {initial_balance:,.2f} ₸\n"
+                    msg += f"  + Сумма выписки ({len(current_rows)} строк): {total_operations:,.2f} ₸\n"
+                    msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
+                    msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
             else:
                 msg += "\n⚠️ Исходящий остаток не найден в файле"
             return msg
