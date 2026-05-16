@@ -139,24 +139,19 @@ def parse_num(s):
         return 0
 
 def parse_справка_num(s):
-    """Парсинг чисел из Справки — формат 1,460,254 или 1460254 или 1 460 254"""
     s = str(s or "").strip()
     s = s.replace("\xa0", "").replace(" ", "")
     comma_count = s.count(",")
     dot_count = s.count(".")
     if comma_count > 1:
-        # 1,460,254 — запятые как разделитель тысяч
         s = s.replace(",", "")
     elif comma_count == 1 and dot_count == 0:
         parts = s.split(",")
         if len(parts[1]) == 3 and len(parts[0]) <= 3:
-            # 1,460 — тысячи
             s = s.replace(",", "")
         else:
-            # дробная часть
             s = s.replace(",", ".")
     elif dot_count > 1:
-        # 1.460.254 — точки как разделитель тысяч
         s = s.replace(".", "")
     try:
         return float(s)
@@ -329,7 +324,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
     search = account_name.strip().lower()
     logger.info(f"Ищем счёт: '{account_name}'")
 
-    # 1. Точное совпадение без учёта регистра
     for row in справка_data:
         if not row or not row[0].strip():
             continue
@@ -340,7 +334,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
                 logger.info(f"Найдено: '{candidate}' = {balance}")
                 return candidate, balance
 
-    # 2. Нечёткий поиск
     best_name = None
     best_balance = None
     best_score = 0.0
@@ -361,22 +354,27 @@ def find_account_in_справка(account_name: str, справка_data: list)
 
     return None, None
 
-def check_balance(account_name, bank_closing_balance, current_rows):
+def check_balance(account_name, bank_closing_balance, current_rows, opening_balance=None):
     """
     Сверка:
-    Начальный остаток (Справка) + сумма операций из ТЕКУЩЕЙ выписки = остаток ДДС
-    Сравниваем с исходящим остатком из банка (bank_closing_balance)
+    - Если есть входящий остаток из выписки — используем его
+    - Иначе берём начальный остаток из Счета2026(Справка)
+    Входящий остаток + сумма операций из текущей выписки = остаток ДДС
+    Сравниваем с исходящим остатком из банка
     """
     try:
-        spreadsheet = get_spreadsheet()
-        справка = spreadsheet.worksheet("Счета2026(Справка)")
-        справка_data = справка.get_all_values()
-        matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
+        if opening_balance is not None:
+            initial_balance = opening_balance
+            source = "входящий остаток из выписки"
+        else:
+            spreadsheet = get_spreadsheet()
+            справка = spreadsheet.worksheet("Счета2026(Справка)")
+            справка_data = справка.get_all_values()
+            matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
+            if initial_balance is None:
+                return None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
+            source = "Справка (начало года)"
 
-        if initial_balance is None:
-            return None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
-
-        # Сумма только из текущей выписки
         total_operations = 0.0
         for r in current_rows:
             try:
@@ -388,31 +386,74 @@ def check_balance(account_name, bank_closing_balance, current_rows):
         bank_balance = round(bank_closing_balance, 2)
 
         logger.info(
-            f"Сверка '{account_name}': начальный={initial_balance}, "
+            f"Сверка '{account_name}': {source}, начальный={initial_balance}, "
             f"операции={total_operations:.2f}, ДДС={dds_balance}, банк={bank_balance}"
         )
 
-        return dds_balance, bank_balance, None
+        return dds_balance, bank_balance, source, None
 
     except Exception as e:
         logger.error(f"check_balance error: {e}")
-        return None, None, str(e)
+        return None, None, None, str(e)
+
+def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
+    msg = ""
+    if closing_balance is not None:
+        dds_balance, bank_balance, source, error = check_balance(
+            account, closing_balance, current_rows, opening_balance
+        )
+        if error:
+            msg += f"\n⚠️ Сверка: {error}"
+        else:
+            total_operations = 0.0
+            for r in current_rows:
+                try:
+                    total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
+                except:
+                    pass
+            initial_balance = round(dds_balance - total_operations, 2)
+
+            diff = round(bank_balance - dds_balance, 2)
+            if abs(diff) < 1:
+                msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
+            else:
+                msg += f"\n❌ Остаток НЕ сходится!\n"
+                msg += f"Банк: {bank_balance:,.2f} ₸\n"
+                msg += f"ДДС:  {dds_balance:,.2f} ₸\n"
+                msg += f"Разница: {diff:,.2f} ₸\n"
+
+            msg += f"\n📊 Расчёт ДДС:\n"
+            msg += f"  Начальный остаток ({source}): {initial_balance:,.2f} ₸\n"
+            msg += f"  + Сумма выписки ({len(current_rows)} строк): {total_operations:,.2f} ₸\n"
+            msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
+            msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
+    else:
+        msg += "\n⚠️ Исходящий остаток не найден в файле"
+    return msg
 
 # ============ XLSX ============
 def process_xlsx(file_bytes):
     rows = []
     closing_balance = None
+    opening_balance = None
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     ws = wb.active
     iban = str(cell_val(ws.cell(row=3, column=3))).strip()
     account = IBAN_MAP.get(iban, iban)
 
+    # Входящий остаток (строка 9)
+    opening_val = cell_val(ws.cell(row=9, column=3))
+    try:
+        opening_balance = float(str(opening_val).replace(" ", "").replace(",", "."))
+    except:
+        opening_balance = None
+
+    # Исходящий остаток (строка 10)
     closing_val = cell_val(ws.cell(row=10, column=3))
-    if closing_val and str(closing_val).replace(".", "").replace(",", "").strip().lstrip("-").isdigit():
-        try:
-            closing_balance = float(str(closing_val).replace(" ", "").replace(",", "."))
-        except:
-            pass
+    try:
+        closing_balance = float(str(closing_val).replace(" ", "").replace(",", "."))
+    except:
+        pass
 
     if not closing_balance:
         for row_idx in range(1, ws.max_row + 1):
@@ -465,7 +506,7 @@ def process_xlsx(file_bytes):
             continue
         rows.append(make_row(date_str, amount, account, desc))
 
-    return rows, account, closing_balance
+    return rows, account, closing_balance, opening_balance
 
 # ============ PDF Kaspi Gold ============
 def process_kaspi_gold_pdf(file_bytes):
@@ -517,7 +558,7 @@ def process_kaspi_gold_pdf(file_bytes):
                     date_str = format_date(date_cell)
                     rows.append(make_row(date_str, amount, account, desc_cell))
 
-    return rows, account, closing_balance
+    return rows, account, closing_balance, None
 
 # ============ PDF BCC ============
 def process_bcc_pdf(file_bytes):
@@ -564,7 +605,7 @@ def process_bcc_pdf(file_bytes):
                         continue
                     rows.append(make_row(date_str, amount, account, desc_cell))
 
-    return rows, account, closing_balance
+    return rows, account, closing_balance, None
 
 # ============ PDF Halyk ============
 def parse_kz_num(s):
@@ -624,7 +665,7 @@ def process_halyk_pdf(file_bytes):
         date_str = f"{int(d):02d}/{mo}/{y}"
         rows.append(make_row(date_str, amount, account, full_desc[:200]))
 
-    return rows, account, closing_balance
+    return rows, account, closing_balance, None
 
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -661,19 +702,21 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(doc.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
 
+        opening_balance = None
+
         if fname.endswith(".xlsx"):
-            rows, account, closing_balance = process_xlsx(file_bytes)
+            rows, account, closing_balance, opening_balance = process_xlsx(file_bytes)
         else:
             with pdfplumber.open(BytesIO(file_bytes)) as pdf:
                 first_page_text = pdf.pages[0].extract_text() or ""
             if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
-                rows, account, closing_balance = process_kaspi_gold_pdf(file_bytes)
+                rows, account, closing_balance, opening_balance = process_kaspi_gold_pdf(file_bytes)
             elif "Народный Банк" in first_page_text or "Halyk" in first_page_text or "HSBKKZKX" in first_page_text:
-                rows, account, closing_balance = process_halyk_pdf(file_bytes)
+                rows, account, closing_balance, opening_balance = process_halyk_pdf(file_bytes)
             elif "ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text or "KZ44856" in first_page_text or "KZ03856" in first_page_text or "KZ50856" in first_page_text:
-                rows, account, closing_balance = process_bcc_pdf(file_bytes)
+                rows, account, closing_balance, opening_balance = process_bcc_pdf(file_bytes)
             else:
-                rows, account, closing_balance = process_kaspi_gold_pdf(file_bytes)
+                rows, account, closing_balance, opening_balance = process_kaspi_gold_pdf(file_bytes)
 
         if not rows:
             await update.message.reply_text("❌ Операции не найдены в файле")
@@ -682,7 +725,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
 
-        # Проверка дублей
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
             if len(row) >= 7:
@@ -715,42 +757,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ", ".join(ranges)
 
         next_row = len(existing_data) + 1
-        
-        def build_balance_msg(account, closing_balance, current_rows):
-            msg = ""
-            if closing_balance is not None:
-                dds_balance, bank_balance, error = check_balance(account, closing_balance, current_rows)
-                if error:
-                    msg += f"\n⚠️ Сверка: {error}"
-                else:
-                    # Считаем сумму текущей выписки для отображения
-                    total_operations = 0.0
-                    for r in current_rows:
-                        try:
-                            total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
-                        except:
-                            pass
-        
-                    # Начальный остаток = ДДС - операции
-                    initial_balance = round(dds_balance - total_operations, 2)
-        
-                    diff = round(bank_balance - dds_balance, 2)
-                    if abs(diff) < 1:
-                        msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
-                    else:
-                        msg += f"\n❌ Остаток НЕ сходится!\n"
-                        msg += f"Банк: {bank_balance:,.2f} ₸\n"
-                        msg += f"ДДС:  {dds_balance:,.2f} ₸\n"
-                        msg += f"Разница: {diff:,.2f} ₸\n"
-        
-                    msg += f"\n📊 Расчёт ДДС:\n"
-                    msg += f"  Начальный остаток (Справка): {initial_balance:,.2f} ₸\n"
-                    msg += f"  + Сумма выписки ({len(current_rows)} строк): {total_operations:,.2f} ₸\n"
-                    msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
-                    msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
-            else:
-                msg += "\n⚠️ Исходящий остаток не найден в файле"
-            return msg
 
         if dupes == len(rows):
             dupe_range = format_row_ranges(dupe_sheet_rows)
@@ -760,7 +766,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Строки в таблице: {dupe_range}\n"
                 f"Ничего не добавлено."
             )
-            msg += build_balance_msg(account, closing_balance, rows)
+            msg += build_balance_msg(account, closing_balance, rows, opening_balance)
             msg += f"\n\n🔗 {SPREADSHEET_URL}"
             await update.message.reply_text(msg)
             return
@@ -779,15 +785,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Добавляю {len(rows)} новых → строки {new_range}"
             )
 
-        # Сортировка по дате (от старых к новым)
         rows.sort(key=lambda r: datetime.strptime(r[3], "%d/%m/%Y") if r[3] else datetime.min)
 
-        # Записываем в таблицу
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
-        # Сверка — начальный остаток из Справки + сумма текущей выписки
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
-        msg += build_balance_msg(account, closing_balance, rows)
+        msg += build_balance_msg(account, closing_balance, rows, opening_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
 
