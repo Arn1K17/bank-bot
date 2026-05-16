@@ -785,7 +785,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
-        msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n"
+        added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
+        msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n📋 Строки в таблице: {added_range}\n"
         msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
