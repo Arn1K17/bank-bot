@@ -180,58 +180,81 @@ def make_row(date_str, amount, account, desc, supplier=""):
     ]
 
 # ============ ДЕДУПЛИКАЦИЯ ============
-def normalize_amount(amt_str):
-    """
-    Нормализует сумму для ключа дедупликации.
-    1500 и 1500.0 дают одинаковый результат "1500".
-    1500.50 -> "1500.5"
-    """
-    s = str(amt_str).strip().replace(" ", "").replace(",", ".")
-    try:
-        f = round(float(s), 2)
-        return str(int(f)) if f == int(f) else str(f)
-    except:
-        return s
-
 def make_dedup_key(date, amount, account, desc):
     """
-    Ключ дедупликации: дата + счёт + номер документа из описания.
-    Сумму НЕ используем — Google Sheets может возвращать округлённые значения через API.
-    Номер референса уникален для каждой операции.
+    Ключ дедупликации — стратегия по типу:
+
+    BCC PDF:       desc начинается с "G2-XXXXXX" или "NT-XXXXXX" или числового номера
+                   -> ключ = (дата, счёт, doc_num)  — сумма НЕ нужна
+
+    Kaspi XLSX:    desc начинается с числового № документа (52841497...)
+                   -> ключ = (дата, счёт, doc_num)  — сумма НЕ нужна
+
+    Народный банк: desc содержит "референс XXXXXXXXXX" или начинается с "NT-XXXXXX"
+                   -> ключ = (дата, счёт, doc_num)  — сумма НЕ нужна
+
+    Kaspi Gold:    нет номера, суммы целые (5400, 30...)
+                   -> ключ = (дата, счёт, сумма_целая, desc[:80])
+                   Google Sheets не округляет целые числа — всё ок
+
+    Kaspi Deposit: в desc попадает остаток "На Депозите X ₸" — уникален
+                   -> ключ = (дата, счёт, сумма, desc[:80])
     """
-    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip().lower()
+    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
+    desc_lower = desc_clean.lower()
 
     doc_num = ""
 
-    # Референс (Народный банк, БЦК)
-    m_ref = re.search(r'референс\s+(\d{8,12})', desc_clean)
-    if m_ref:
-        doc_num = m_ref.group(1)
-
-    # 00UBS номер (Народный банк)
+    # BCC: G2-XXXXXX в начале описания
     if not doc_num:
-        m_ubs = re.search(r'00ubs(\d+)', desc_clean)
-        if m_ubs:
-            doc_num = m_ubs.group(1)
+        m = re.match(r'^(g2-\d+)', desc_lower)
+        if m:
+            doc_num = m.group(1)
 
-    # NT- номер в начале
+    # BCC / Народный: NT-XXXXXX или NT XXXXXX в начале
     if not doc_num:
-        m_nt = re.match(r'^nt-(\d+)', desc_clean)
-        if m_nt:
-            doc_num = m_nt.group(1)
+        m = re.match(r'^(nt-?\d+)', desc_lower)
+        if m:
+            doc_num = m.group(1)
 
-    # Цифровой номер документа в начале строки
+    # Народный банк: "референс XXXXXXXXXX" в тексте
     if not doc_num:
-        m_num = re.match(r'^(\d{7,12})\b', desc_clean)
-        if m_num:
-            doc_num = m_num.group(1)
+        m = re.search(r'референс\s+(\d{8,12})', desc_lower)
+        if m:
+            doc_num = "ref-" + m.group(1)
+
+    # Народный банк: "00UBS..." в тексте
+    if not doc_num:
+        m = re.search(r'00ubs(\d+)', desc_lower)
+        if m:
+            doc_num = "ubs-" + m.group(1)
+
+    # Kaspi XLSX / BCC числовой длинный: 7-12 цифр в начале
+    if not doc_num:
+        m = re.match(r'^(\d{7,12})\b', desc_clean)
+        if m:
+            doc_num = m.group(1)
+
+    # BCC числовой платёж короткий: 3-6 цифр в начале (212, 213, 699...)
+    if not doc_num:
+        m = re.match(r'^(\d{3,6})\b', desc_clean)
+        if m:
+            doc_num = "p-" + m.group(1)
 
     if doc_num:
-        # Если есть уникальный номер — сумма не нужна
+        # Есть уникальный номер — сумма не нужна, не зависим от округления
         return (str(date).strip(), str(account).strip(), doc_num)
 
-    # Если номера нет — используем дату + счёт + нормализованную сумму + начало описания
-    amt = normalize_amount(amount)
+    # Нет номера (Kaspi Gold, Kaspi Deposit):
+    # Gold: суммы целые -> Google Sheets не округляет -> ок
+    # Deposit: desc содержит уникальный остаток -> ок
+    amt_str = str(amount).strip().replace(",", ".")
+    try:
+        f = round(float(amt_str), 2)
+        amt = str(int(f)) if f == int(f) else str(f)
+    except:
+        amt = amt_str
+
     return (str(date).strip(), str(account).strip(), amt, desc_clean[:80])
 
 # ============ OPENROUTER AI ============
@@ -241,7 +264,6 @@ def get_sheets_data_for_ai():
         реестр = spreadsheet.worksheet(SHEET_NAME)
         data = реестр.get_all_values()
 
-        # Читаем начальные остатки из Справки
         initial_balances = {}
         try:
             справка = spreadsheet.worksheet("Счета2026(Справка)")
@@ -288,7 +310,6 @@ def get_sheets_data_for_ai():
         }
 
         summary = f"Всего строк в реестре: {len(rows)}\n\n"
-
         summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
         for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
             name = month_names.get(m, f"Месяц {m}")
@@ -439,7 +460,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
         if candidate.lower() == search:
             balance = parse_справка_num(row[1] if len(row) > 1 else "")
             if balance is not None:
-                logger.info(f"Точное совпадение: '{candidate}' = {balance}")
                 return candidate, balance
     best_name = None
     best_balance = None
@@ -453,7 +473,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
             best_score = score
             best_name = candidate
             best_balance = parse_справка_num(row[1] if len(row) > 1 else "")
-    logger.info(f"Нечёткий: '{best_name}' score={best_score:.2f} balance={best_balance}")
     if best_score >= 0.4 and best_balance is not None:
         return best_name, best_balance
     return None, None
@@ -461,7 +480,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
 def check_balance(account_name, bank_closing_balance):
     try:
         spreadsheet = get_spreadsheet()
-
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
@@ -488,7 +506,7 @@ def check_balance(account_name, bank_closing_balance):
 
         logger.info(
             f"Сверка '{account_name}': Справка={initial_balance}, "
-            f"операций в реестре={ops_count}, сумма={total_operations:.2f}, "
+            f"операций={ops_count}, сумма={total_operations:.2f}, "
             f"ДДС={dds_balance}, банк={bank_balance}"
         )
 
@@ -527,6 +545,10 @@ def build_balance_msg(account, closing_balance, current_rows, opening_balance=No
 
 # ============ XLSX ============
 def process_xlsx(file_bytes):
+    """
+    Kaspi XLSX: № документа из колонки A добавляется в начало desc.
+    Это позволяет make_dedup_key найти его и использовать как ключ.
+    """
     rows = []
     closing_balance = None
     opening_balance = None
@@ -578,7 +600,15 @@ def process_xlsx(file_bytes):
         debit = cell_val(ws.cell(row=row_idx, column=3))
         credit = cell_val(ws.cell(row=row_idx, column=4))
         supplier = str(cell_val(ws.cell(row=row_idx, column=5)) or "")
-        desc = str(cell_val(ws.cell(row=row_idx, column=9)))
+        desc_raw = str(cell_val(ws.cell(row=row_idx, column=9)) or "")
+        # КЛЮЧЕВОЕ: добавляем № документа из колонки A в начало desc
+        doc_num_val = str(cell_val(ws.cell(row=row_idx, column=1)) or "").strip()
+        # Только если это числовой номер документа (7+ цифр), не заголовок
+        if doc_num_val and re.match(r'^\d{7,}$', doc_num_val):
+            desc = f"{doc_num_val} {desc_raw}".strip()
+        else:
+            desc = desc_raw
+
         if not date_val:
             continue
         date_str = format_date(date_val)
@@ -624,7 +654,7 @@ def process_kaspi_gold_pdf(file_bytes):
         elif "KZ97722C000015235365" in first_text:
             account = IBAN_MAP.get("KZ97722C000015235365", account)
         elif "KZ19722RU00001041014" in first_text:
-            account = IBAN_MAP.get("KZ19722RU00001041014", "Каспи Депозит Ип Серик")
+            account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
 
         if is_deposit:
             matches = re.findall(
@@ -699,6 +729,10 @@ def process_kaspi_gold_pdf(file_bytes):
 
 # ============ PDF BCC ============
 def process_bcc_pdf(file_bytes):
+    """
+    BCC PDF: doc_num (G2-XXXXXX, NT-XXXXXX, числовой) добавляется в начало desc.
+    Это позволяет make_dedup_key найти его и использовать как ключ.
+    """
     rows = []
     iban = ""
     account = "БЦК Ип Серик"
@@ -769,10 +803,11 @@ def process_bcc_pdf(file_bytes):
             if len(row) < 12:
                 continue
 
+            doc_num_cell = str(row[0] or "").replace("\n", "").strip()
             date_cell = str(row[1] or "").replace("\n", "").strip()
             debit_cell = str(row[7] or "").replace("\n", "").strip()
             credit_cell = str(row[8] or "").replace("\n", "").strip()
-            desc_cell = str(row[11] or "").replace("\n", " ").strip()
+            desc_raw = str(row[11] or "").replace("\n", " ").strip()
 
             if "итого" in date_cell.lower() or "жиынтығы" in date_cell.lower():
                 continue
@@ -792,7 +827,13 @@ def process_bcc_pdf(file_bytes):
             else:
                 continue
 
-            rows.append(make_row(date_str, amount, account, desc_cell))
+            # КЛЮЧЕВОЕ: добавляем doc_num в начало desc для дедупликации
+            if doc_num_cell:
+                desc = f"{doc_num_cell} {desc_raw}".strip()
+            else:
+                desc = desc_raw
+
+            rows.append(make_row(date_str, amount, account, desc))
 
     logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
     return rows, account, closing_balance, opening_balance
@@ -942,9 +983,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Операции не найдены в файле")
             return
 
-        # Небольшая пауза чтобы Google Sheets успел обновить данные
         time.sleep(2)
-        # Создаём свежее подключение чтобы избежать кэша gspread
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
         logger.info(f"Всего строк в таблице: {len(existing_data)}")
@@ -956,14 +995,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 existing_key_to_row[key] = i
         existing_keys = set(existing_key_to_row.keys())
 
-        # ОТЛАДКА: логируем первые 3 ключа из таблицы и из файла
-        debug_table = [k for k in list(existing_keys)[:5] if account.lower() in k[2].lower()][:3]
-        debug_new = [make_dedup_key(r[3], r[4], r[6], r[8]) for r in rows[:3]]
-        logger.info(f"DEBUG TABLE KEYS (account={account}): {debug_table}")
-        logger.info(f"DEBUG NEW KEYS: {debug_new}")
-        # Проверяем первую строку нового файла есть ли в таблице
+        # Логируем ключи для отладки
         first_new_key = make_dedup_key(rows[0][3], rows[0][4], rows[0][6], rows[0][8])
-        logger.info(f"DEBUG first new key in existing: {first_new_key in existing_keys}")
+        logger.info(f"Первый новый ключ: {first_new_key}")
+        logger.info(f"Есть в таблице: {first_new_key in existing_keys}")
 
         dupe_sheet_rows = []
         dupe_rows = []
