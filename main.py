@@ -950,6 +950,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 existing_key_to_row[key] = i
         existing_keys = set(existing_key_to_row.keys())
 
+        # ОТЛАДКА: логируем первые 3 ключа из таблицы и из файла
+        debug_table = [k for k in list(existing_keys)[:5] if account.lower() in k[2].lower()][:3]
+        debug_new = [make_dedup_key(r[3], r[4], r[6], r[8]) for r in rows[:3]]
+        logger.info(f"DEBUG TABLE KEYS (account={account}): {debug_table}")
+        logger.info(f"DEBUG NEW KEYS: {debug_new}")
+        # Проверяем первую строку нового файла есть ли в таблице
+        first_new_key = make_dedup_key(rows[0][3], rows[0][4], rows[0][6], rows[0][8])
+        logger.info(f"DEBUG first new key in existing: {first_new_key in existing_keys}")
+
         dupe_sheet_rows = []
         dupe_rows = []
         for r in rows:
