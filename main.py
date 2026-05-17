@@ -224,19 +224,17 @@ def _extract_doc_num(desc_clean: str) -> str:
 def _normalize_amount(amount) -> str:
     """
     Нормализует сумму для ключа дедупликации.
-    Убирает разделители тысяч, округляет до целого если дробная часть < 1.
-    Kaspi округляет копейки при записи в таблицу: -32.3 → '-32', -392.43 → '-392'.
+    Google Sheets хранит суммы с запятой как разделителем тысяч: '8,000', '-63,945', '-2,547'
+    и округляет копейки: -32.3 → '-32', -392.43 → '-392'.
+    Алгоритм: убираем пробелы и неразрывные пробелы, затем убираем запятые (разделитель тысяч),
+    затем переводим в float и округляем до целого.
     """
-    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "").replace(",", ".")
-    # Убираем запятые-разделители тысяч если их несколько (8,000 → 8000)
-    # Уже сделано выше через replace(",", ".")... но 8,000 станет 8.000
-    # Поэтому обрабатываем отдельно: если точек больше одной — убираем все кроме последней
-    parts = amt_str.split(".")
-    if len(parts) > 2:
-        amt_str = "".join(parts[:-1]) + "." + parts[-1]
+    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "")
+    # Запятая — всегда разделитель тысяч (формат Google Sheets), просто убираем
+    amt_str = amt_str.replace(",", "")
+    # Точка — десятичный разделитель
     try:
         f = float(amt_str)
-        # Округляем до целого — таблица хранит без копеек
         return str(int(round(f)))
     except:
         return amt_str
@@ -249,13 +247,37 @@ def make_dedup_key(date, amount, account, desc):
     - Если нет — ключ (дата, счёт, сумма_округлённая)
     """
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
-
     doc_num = _extract_doc_num(desc_clean)
 
     if doc_num:
         return (str(date).strip(), str(account).strip(), doc_num)
 
     return (str(date).strip(), str(account).strip(), _normalize_amount(amount))
+
+
+def make_fallback_key(date, amount, account):
+    """
+    Запасной ключ только по (дата, счёт, сумма) — без doc_num и без desc.
+    Используется чтобы новая строка с doc_num в desc нашла старую строку в таблице
+    у которой того же doc_num не было (строки добавленные до введения префиксов).
+    """
+    return (str(date).strip(), str(account).strip(), _normalize_amount(amount))
+
+
+def is_duplicate(r, existing_keys):
+    """
+    Проверяет является ли строка r дублем.
+    Проверяет оба ключа: основной (с doc_num если есть) и fallback (только дата+счёт+сумма).
+    """
+    key = make_dedup_key(r[3], r[4], r[6], r[8])
+    if key in existing_keys:
+        return True
+    # Fallback: проверяем без doc_num — для совместимости со старыми строками таблицы
+    fb_key = make_fallback_key(r[3], r[4], r[6])
+    if fb_key in existing_keys:
+        return True
+    return False
+
 
 # ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
@@ -545,10 +567,6 @@ def build_balance_msg(account, closing_balance, current_rows, opening_balance=No
 
 # ============ XLSX ============
 def process_xlsx(file_bytes):
-    """
-    Kaspi XLSX: № документа из колонки A добавляется в начало desc.
-    Это позволяет make_dedup_key найти его и использовать как ключ.
-    """
     rows = []
     closing_balance = None
     opening_balance = None
@@ -601,9 +619,7 @@ def process_xlsx(file_bytes):
         credit = cell_val(ws.cell(row=row_idx, column=4))
         supplier = str(cell_val(ws.cell(row=row_idx, column=5)) or "")
         desc_raw = str(cell_val(ws.cell(row=row_idx, column=9)) or "")
-        # КЛЮЧЕВОЕ: добавляем № документа из колонки A в начало desc
         doc_num_val = str(cell_val(ws.cell(row=row_idx, column=1)) or "").strip()
-        # Только если это числовой номер документа (7+ цифр), не заголовок
         if doc_num_val and re.match(r'^\d{7,}$', doc_num_val):
             desc = f"{doc_num_val} {desc_raw}".strip()
         else:
@@ -729,10 +745,6 @@ def process_kaspi_gold_pdf(file_bytes):
 
 # ============ PDF BCC ============
 def process_bcc_pdf(file_bytes):
-    """
-    BCC PDF: doc_num (G2-XXXXXX, NT-XXXXXX, числовой) добавляется в начало desc.
-    Это позволяет make_dedup_key найти его и использовать как ключ.
-    """
     rows = []
     iban = ""
     account = "БЦК Ип Серик"
@@ -827,7 +839,6 @@ def process_bcc_pdf(file_bytes):
             else:
                 continue
 
-            # КЛЮЧЕВОЕ: добавляем doc_num в начало desc для дедупликации
             if doc_num_cell:
                 desc = f"{doc_num_cell} {desc_raw}".strip()
             else:
@@ -991,18 +1002,16 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
             if len(row) >= 9:
-                # Нормализуем amount из таблицы: убираем запятые-разделители тысяч
-                # Google Sheets хранит '8,000' или '-63,945' — нужно привести к '8000', '-63945'
+                # Нормализуем amount: убираем запятые-разделители тысяч
                 raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
                 key = make_dedup_key(row[3], raw_amount, row[6], row[8])
                 existing_key_to_row[key] = i
 
-                # Дополнительный ключ: (дата, счёт, сумма) без doc_num
-                # Нужен для старых строк без числового префикса в desc,
-                # чтобы они совпадали с новыми строками у которых есть prefix
-                fallback_key = (str(row[3]).strip(), str(row[6]).strip(), _normalize_amount(raw_amount))
-                if fallback_key not in existing_key_to_row:
-                    existing_key_to_row[fallback_key] = i
+                # Всегда добавляем fallback-ключ (дата, счёт, сумма) без doc_num
+                # Это обеспечивает совместимость новых строк с prefix со старыми без prefix
+                fb_key = make_fallback_key(row[3], raw_amount, row[6])
+                if fb_key not in existing_key_to_row:
+                    existing_key_to_row[fb_key] = i
 
         existing_keys = set(existing_key_to_row.keys())
 
@@ -1014,27 +1023,34 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dupe_sheet_rows = []
         dupe_rows = []
         for r in rows:
-            key = make_dedup_key(r[3], r[4], r[6], r[8])
-            if key in existing_keys:
+            # Используем is_duplicate которая проверяет и основной и fallback ключ
+            if is_duplicate(r, existing_keys):
                 dupe_rows.append(r)
-                dupe_sheet_rows.append(existing_key_to_row[key])
+                # Определяем номер строки в таблице (основной или fallback)
+                key = make_dedup_key(r[3], r[4], r[6], r[8])
+                fb_key = make_fallback_key(r[3], r[4], r[6])
+                sheet_row = existing_key_to_row.get(key) or existing_key_to_row.get(fb_key)
+                dupe_sheet_rows.append(sheet_row)
         dupes = len(dupe_rows)
 
         # DEBUG: логируем строки которые НЕ найдены как дубли
         for r in rows:
-            key = make_dedup_key(r[3], r[4], r[6], r[8])
-            if key not in existing_keys:
-                logger.info(f"НОВАЯ СТРОКА: key={key}")
+            if not is_duplicate(r, existing_keys):
+                key = make_dedup_key(r[3], r[4], r[6], r[8])
+                fb_key = make_fallback_key(r[3], r[4], r[6])
+                logger.info(f"НОВАЯ СТРОКА: key={key}, fb_key={fb_key}")
                 logger.info(f"  date={r[3]}, amount={r[4]}, account={r[6]}, desc={r[8]!r}")
-                # Ищем похожие строки в таблице по дате и счёту
                 for i, erow in enumerate(existing_data[1:], start=2):
                     if len(erow) >= 9 and erow[3] == r[3] and erow[6] == r[6]:
-                        logger.info(f"  ПОХОЖАЯ В ТАБЛИЦЕ row={i}: amount={erow[4]!r}, desc={erow[8]!r}, key={make_dedup_key(erow[3], erow[4], erow[6], erow[8])}")
+                        raw_a = str(erow[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
+                        logger.info(f"  ПОХОЖАЯ В ТАБЛИЦЕ row={i}: amount={erow[4]!r}, desc={erow[8]!r}, key={make_dedup_key(erow[3], raw_a, erow[6], erow[8])}, fb={make_fallback_key(erow[3], raw_a, erow[6])}")
 
         def format_row_ranges(row_nums):
             if not row_nums:
                 return ""
-            sorted_nums = sorted(row_nums)
+            sorted_nums = sorted(n for n in row_nums if n is not None)
+            if not sorted_nums:
+                return ""
             ranges = []
             start = end = sorted_nums[0]
             for n in sorted_nums[1:]:
@@ -1064,10 +1080,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if dupes > 0:
             dupe_range = format_row_ranges(dupe_sheet_rows)
-            new_rows = [
-                r for r in rows
-                if make_dedup_key(r[3], r[4], r[6], r[8]) not in existing_keys
-            ]
+            new_rows = [r for r in rows if not is_duplicate(r, existing_keys)]
             new_range = format_row_ranges(list(range(next_row, next_row + len(new_rows))))
             rows = new_rows
             await update.message.reply_text(
