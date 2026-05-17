@@ -980,8 +980,25 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
             if len(row) >= 9:
-                key = make_dedup_key(row[3], row[4], row[6], row[8])
+                # Нормализуем amount из таблицы: убираем запятые-разделители тысяч
+                # Google Sheets хранит '8,000' или '-63,945' — нужно привести к '8000', '-63945'
+                raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
+                key = make_dedup_key(row[3], raw_amount, row[6], row[8])
                 existing_key_to_row[key] = i
+
+                # Дополнительный ключ: (дата, счёт, сумма) без doc_num
+                # Нужен для старых строк без числового префикса в desc,
+                # чтобы они совпадали с новыми строками у которых есть prefix
+                amt_str = raw_amount.replace(".", "").replace("-", "").strip()
+                try:
+                    f = round(float(raw_amount), 2)
+                    amt = str(int(f)) if f == int(f) else str(f)
+                except:
+                    amt = raw_amount
+                fallback_key = (str(row[3]).strip(), str(row[6]).strip(), amt)
+                if fallback_key not in existing_key_to_row:
+                    existing_key_to_row[fallback_key] = i
+
         existing_keys = set(existing_key_to_row.keys())
 
         # Логируем ключи для отладки
