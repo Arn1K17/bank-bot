@@ -180,74 +180,69 @@ def make_row(date_str, amount, account, desc, supplier=""):
     ]
 
 # ============ ДЕДУПЛИКАЦИЯ ============
-def make_dedup_key(date, amount, account, desc):
+def _extract_doc_num(desc_clean: str) -> str:
     """
-    Ключ дедупликации — стратегия по типу:
-
-    BCC PDF:       desc начинается с "G2-XXXXXX" или "NT-XXXXXX" или числового номера
-                   -> ключ = (дата, счёт, doc_num)  — сумма НЕ нужна
-
-    Kaspi XLSX:    desc начинается с числового № документа (52841497...)
-                   -> ключ = (дата, счёт, doc_num)  — сумма НЕ нужна
-
-    Народный банк: desc содержит "референс XXXXXXXXXX" или начинается с "NT-XXXXXX"
-                   -> ключ = (дата, счёт, doc_num)  — сумма НЕ нужна
-
-    Kaspi Gold:    нет номера, суммы целые (5400, 30...)
-                   -> ключ = (дата, счёт, сумма_целая, desc[:80])
-                   Google Sheets не округляет целые числа — всё ок
-
-    Kaspi Deposit: в desc попадает остаток "На Депозите X ₸" — уникален
-                   -> ключ = (дата, счёт, сумма, desc[:80])
+    Извлекает уникальный номер документа из описания.
+    Ищет как в начале строки (новые строки с префиксом),
+    так и ВНУТРИ строки (старые строки без префикса).
     """
-    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
     desc_lower = desc_clean.lower()
 
-    doc_num = ""
+    # BCC: G2-XXXXXX в начале
+    m = re.match(r'^(g2-\d+)', desc_lower)
+    if m:
+        return m.group(1)
 
-    # BCC: G2-XXXXXX в начале описания
-    if not doc_num:
-        m = re.match(r'^(g2-\d+)', desc_lower)
-        if m:
-            doc_num = m.group(1)
+    # BCC / Народный: NT-XXXXXX в начале
+    m = re.match(r'^(nt-?\d+)', desc_lower)
+    if m:
+        return m.group(1)
 
-    # BCC / Народный: NT-XXXXXX или NT XXXXXX в начале
-    if not doc_num:
-        m = re.match(r'^(nt-?\d+)', desc_lower)
-        if m:
-            doc_num = m.group(1)
+    # Народный: "референс XXXXXXXXXX" в любом месте
+    m = re.search(r'референс\s+(\d{8,12})', desc_lower)
+    if m:
+        return "ref-" + m.group(1)
 
-    # Народный банк: "референс XXXXXXXXXX" в тексте
-    if not doc_num:
-        m = re.search(r'референс\s+(\d{8,12})', desc_lower)
-        if m:
-            doc_num = "ref-" + m.group(1)
+    # Народный: "00UBS..." в любом месте
+    m = re.search(r'00ubs(\d+)', desc_lower)
+    if m:
+        return "ubs-" + m.group(1)
 
-    # Народный банк: "00UBS..." в тексте
-    if not doc_num:
-        m = re.search(r'00ubs(\d+)', desc_lower)
-        if m:
-            doc_num = "ubs-" + m.group(1)
+    # Kaspi XLSX / BCC: 7-12 цифр в НАЧАЛЕ (новые строки — с префиксом)
+    m = re.match(r'^(\d{7,12})\b', desc_clean)
+    if m:
+        return m.group(1)
 
-    # Kaspi XLSX / BCC числовой длинный: 7-12 цифр в начале
-    if not doc_num:
-        m = re.match(r'^(\d{7,12})\b', desc_clean)
-        if m:
-            doc_num = m.group(1)
+    # BCC короткий: 3-6 цифр в начале
+    m = re.match(r'^(\d{3,6})\b', desc_clean)
+    if m:
+        return "p-" + m.group(1)
 
-    # BCC числовой платёж короткий: 3-6 цифр в начале (212, 213, 699...)
-    if not doc_num:
-        m = re.match(r'^(\d{3,6})\b', desc_clean)
-        if m:
-            doc_num = "p-" + m.group(1)
+    # *** ФИКС: ищем 7-12 цифр ВНУТРИ desc (для старых строк без числового префикса) ***
+    # Это покрывает случай когда старая строка не имела doc_num в начале,
+    # но номер документа присутствует где-то в тексте описания
+    m = re.search(r'(?<!\d)(\d{7,12})(?!\d)', desc_clean)
+    if m:
+        return m.group(1)
+
+    return ""
+
+
+def make_dedup_key(date, amount, account, desc):
+    """
+    Ключ дедупликации. Устойчив к старым строкам без числового префикса:
+    - Сначала пытается найти уникальный номер документа (в начале или внутри desc)
+    - Если номер найден — ключ (дата, счёт, doc_num), сумма не нужна
+    - Если нет — ключ (дата, счёт, сумма, desc[:80]) — для Kaspi Gold / Deposit
+    """
+    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
+
+    doc_num = _extract_doc_num(desc_clean)
 
     if doc_num:
-        # Есть уникальный номер — сумма не нужна, не зависим от округления
         return (str(date).strip(), str(account).strip(), doc_num)
 
-    # Нет номера (Kaspi Gold, Kaspi Deposit):
-    # Gold: суммы целые -> Google Sheets не округляет -> ок
-    # Deposit: desc содержит уникальный остаток -> ок
+    # Нет номера (Kaspi Gold, Kaspi Deposit)
     amt_str = str(amount).strip().replace(",", ".")
     try:
         f = round(float(amt_str), 2)
