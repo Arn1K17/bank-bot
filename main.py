@@ -191,7 +191,7 @@ def make_dedup_key(date, amount, account, desc):
         pass
     # Нормализуем описание — убираем лишние пробелы и переносы
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip().lower()
-    desc_short = desc_clean[:50]
+    desc_short = desc_clean[:80]
     return (str(date).strip(), amt, str(account).strip(), desc_short)
 
 # ============ OPENROUTER AI ============
