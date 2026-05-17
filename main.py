@@ -221,13 +221,32 @@ def _extract_doc_num(desc_clean: str) -> str:
     return ""
 
 
+def _normalize_amount(amount) -> str:
+    """
+    Нормализует сумму для ключа дедупликации.
+    Убирает разделители тысяч, округляет до целого если дробная часть < 1.
+    Kaspi округляет копейки при записи в таблицу: -32.3 → '-32', -392.43 → '-392'.
+    """
+    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "").replace(",", ".")
+    # Убираем запятые-разделители тысяч если их несколько (8,000 → 8000)
+    # Уже сделано выше через replace(",", ".")... но 8,000 станет 8.000
+    # Поэтому обрабатываем отдельно: если точек больше одной — убираем все кроме последней
+    parts = amt_str.split(".")
+    if len(parts) > 2:
+        amt_str = "".join(parts[:-1]) + "." + parts[-1]
+    try:
+        f = float(amt_str)
+        # Округляем до целого — таблица хранит без копеек
+        return str(int(round(f)))
+    except:
+        return amt_str
+
+
 def make_dedup_key(date, amount, account, desc):
     """
     Ключ дедупликации:
     - Если найден уникальный номер документа — ключ (дата, счёт, doc_num)
-    - Если нет — ключ (дата, счёт, сумма) без desc,
-      т.к. desc может незначительно отличаться между загрузками
-      (пробелы, обрезка, перенос строк) и ломать сравнение
+    - Если нет — ключ (дата, счёт, сумма_округлённая)
     """
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
 
@@ -236,15 +255,7 @@ def make_dedup_key(date, amount, account, desc):
     if doc_num:
         return (str(date).strip(), str(account).strip(), doc_num)
 
-    # Нет номера документа — используем только дату + счёт + сумму
-    amt_str = str(amount).strip().replace(",", ".")
-    try:
-        f = round(float(amt_str), 2)
-        amt = str(int(f)) if f == int(f) else str(f)
-    except:
-        amt = amt_str
-
-    return (str(date).strip(), str(account).strip(), amt)
+    return (str(date).strip(), str(account).strip(), _normalize_amount(amount))
 
 # ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
@@ -989,13 +1000,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Дополнительный ключ: (дата, счёт, сумма) без doc_num
                 # Нужен для старых строк без числового префикса в desc,
                 # чтобы они совпадали с новыми строками у которых есть prefix
-                amt_str = raw_amount.replace(".", "").replace("-", "").strip()
-                try:
-                    f = round(float(raw_amount), 2)
-                    amt = str(int(f)) if f == int(f) else str(f)
-                except:
-                    amt = raw_amount
-                fallback_key = (str(row[3]).strip(), str(row[6]).strip(), amt)
+                fallback_key = (str(row[3]).strip(), str(row[6]).strip(), _normalize_amount(raw_amount))
                 if fallback_key not in existing_key_to_row:
                     existing_key_to_row[fallback_key] = i
 
