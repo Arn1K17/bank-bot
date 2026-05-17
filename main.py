@@ -178,6 +178,21 @@ def make_row(date_str, amount, account, desc, supplier=""):
         str(supplier) if supplier else "",
     ]
 
+# ============ ДЕДУПЛИКАЦИЯ ============
+def make_dedup_key(date, amount, account, desc):
+    """
+    Ключ дедупликации: дата + нормализованная сумма + счёт + первые 50 символов описания.
+    Это надёжнее чем просто дата+сумма+счёт — два одинаковых платежа в один день
+    с разным описанием НЕ будут считаться дублями.
+    """
+    amt = str(amount).strip().replace(" ", "").replace(",", ".")
+    try:
+        amt = str(round(float(amt), 2))
+    except:
+        pass
+    desc_short = str(desc).strip()[:50]
+    return (str(date).strip(), amt, str(account).strip(), desc_short)
+
 # ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
     try:
@@ -242,7 +257,6 @@ def get_sheets_data_for_ai():
         summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
         total_all = 0.0
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
-            # Ищем начальный остаток в Справке
             initial = 0.0
             best_score = 0.0
             for name, bal in initial_balances.items():
@@ -258,7 +272,7 @@ def get_sheets_data_for_ai():
             summary += f"  {acc}: {current:,.0f} ₸  (нач.остаток: {initial:,.0f} + обороты: {ops_total:,.0f})\n"
         summary += f"  ИТОГО НА ВСЕХ СЧЕТАХ: {total_all:,.0f} ₸\n"
 
-        summary += "\nОБОРОТЫ ПО МЕСЯЦАМ ПО СЧЕТАМ (только операции без начального остатка):\n"
+        summary += "\nОБОРОТЫ ПО СЧЕТАМ (только операции без начального остатка):\n"
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
             summary += f"  {acc}: {ops_total:,.0f} ₸\n"
 
@@ -313,10 +327,8 @@ def ask_ai(question: str) -> str:
         text = re.sub(r'^(answer|Answer)\s*', '', text).strip()
         # Убираем английские рассуждения — ищем первый абзац на русском
         lines = text.split("\n")
-        # Если больше половины строк на английском — ищем русскую часть
         eng_lines = [l for l in lines if l.strip() and re.search(r'[a-zA-Z]{3,}', l) and not re.search(r'[а-яА-Я]{3,}', l)]
         if len(eng_lines) > len(lines) / 3:
-            # Ищем строки на русском
             rus_lines = [l for l in lines if re.search(r'[а-яА-Я]{3,}', l)]
             if rus_lines:
                 text = "\n".join(rus_lines)
@@ -421,7 +433,7 @@ def check_balance(account_name, bank_closing_balance):
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
         if initial_balance is None:
-            return None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
+            return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
         # 2. ВСЕ операции по этому счёту из реестра за весь год
         реестр = spreadsheet.worksheet(SHEET_NAME)
@@ -431,7 +443,6 @@ def check_balance(account_name, bank_closing_balance):
         for row in реестр_data[1:]:  # пропускаем заголовок
             if len(row) < 7:
                 continue
-            # col[6] = счёт, col[4] = сумма
             acc_in_row = row[6].strip()
             if acc_in_row.lower() == account_name.lower() or _account_similarity(account_name, acc_in_row) >= 0.85:
                 try:
@@ -459,11 +470,7 @@ def build_balance_msg(account, closing_balance, current_rows, opening_balance=No
     msg = ""
     if closing_balance is not None:
         result = check_balance(account, closing_balance)
-        if len(result) == 6:
-            dds_balance, bank_balance, initial_balance, ops_count, total_operations, error = result
-        else:
-            error = result[-1]
-            dds_balance = bank_balance = initial_balance = ops_count = total_operations = None
+        dds_balance, bank_balance, initial_balance, ops_count, total_operations, error = result
 
         if error:
             msg += f"\n⚠️ Сверка: {error}"
@@ -705,7 +712,6 @@ def process_bcc_pdf(file_bytes):
                         all_table_rows.append(list(row))
 
         # Склеиваем строки разорванные между страницами
-        # Признак обрыва: col[0] == "NT-" без номера транзакции
         merged_rows = []
         i = 0
         while i < len(all_table_rows):
@@ -742,7 +748,6 @@ def process_bcc_pdf(file_bytes):
             credit_cell = str(row[8] or "").replace("\n", "").strip()
             desc_cell = str(row[11] or "").replace("\n", " ").strip()
 
-            # Пропускаем строку итогов
             if "итого" in date_cell.lower() or "жиынтығы" in date_cell.lower():
                 continue
 
@@ -910,17 +915,19 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
 
+        # Строим словарь существующих ключей с номерами строк
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
-            if len(row) >= 7:
-                key = (row[3].strip(), row[4].strip(), row[6].strip())
+            if len(row) >= 9:
+                key = make_dedup_key(row[3], row[4], row[6], row[8])
                 existing_key_to_row[key] = i
         existing_keys = set(existing_key_to_row.keys())
 
+        # Проверяем дубли
         dupe_sheet_rows = []
         dupe_rows = []
         for r in rows:
-            key = (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip())
+            key = make_dedup_key(r[3], r[4], r[6], r[8])
             if key in existing_keys:
                 dupe_rows.append(r)
                 dupe_sheet_rows.append(existing_key_to_row[key])
@@ -961,7 +968,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dupe_range = format_row_ranges(dupe_sheet_rows)
             new_rows = [
                 r for r in rows
-                if (str(r[3]).strip(), str(r[4]).strip(), str(r[6]).strip()) not in existing_keys
+                if make_dedup_key(r[3], r[4], r[6], r[8]) not in existing_keys
             ]
             new_range = format_row_ranges(list(range(next_row, next_row + len(new_rows))))
             rows = new_rows
