@@ -179,35 +179,56 @@ def make_row(date_str, amount, account, desc, supplier=""):
     ]
 
 # ============ ДЕДУПЛИКАЦИЯ ============
+def normalize_amount(amt_str):
+    """
+    Нормализует сумму для ключа дедупликации.
+    1500 и 1500.0 дают одинаковый результат "1500".
+    1500.50 -> "1500.5"
+    """
+    s = str(amt_str).strip().replace(" ", "").replace(",", ".")
+    try:
+        f = round(float(s), 2)
+        return str(int(f)) if f == int(f) else str(f)
+    except:
+        return s
+
 def make_dedup_key(date, amount, account, desc):
     """
-    Ключ дедупликации: дата + сумма + счёт + номер документа из описания.
+    Ключ дедупликации: дата + нормализованная сумма + счёт + номер документа из описания.
     Номер документа уникален для каждой операции и стабилен при повторном чтении PDF.
     """
-    amt = str(amount).strip().replace(" ", "").replace(",", ".")
-    try:
-        amt = str(round(float(amt), 2))
-    except:
-        pass
+    amt = normalize_amount(amount)
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip().lower()
+
     # Извлекаем уникальный идентификатор операции из описания
     doc_num = ""
+
     # Референс (Народный банк, БЦК)
     m_ref = re.search(r'референс\s+(\d{8,12})', desc_clean)
     if m_ref:
         doc_num = m_ref.group(1)
+
     # 00UBS номер (Народный банк)
     if not doc_num:
         m_ubs = re.search(r'00ubs(\d+)', desc_clean)
         if m_ubs:
             doc_num = m_ubs.group(1)
-    # Номер документа в начале строки (Народный банк: "70923980 народный банк...")
+
+    # NT- номер в начале (Народный банк: "NT-3935251031 ...")
     if not doc_num:
-        m_num = re.match(r'^(\d{7,10})\b', desc_clean)
+        m_nt = re.match(r'^nt-(\d+)', desc_clean)
+        if m_nt:
+            doc_num = m_nt.group(1)
+
+    # Номер документа в начале строки (цифровой)
+    if not doc_num:
+        m_num = re.match(r'^(\d{7,12})\b', desc_clean)
         if m_num:
             doc_num = m_num.group(1)
+
     if doc_num:
         return (str(date).strip(), amt, str(account).strip(), doc_num)
+
     # Если номера нет — первые 80 символов описания
     return (str(date).strip(), amt, str(account).strip(), desc_clean[:80])
 
@@ -271,7 +292,6 @@ def get_sheets_data_for_ai():
             name = month_names.get(m, f"Месяц {m}")
             summary += f"  {name}: {month_totals[m]:,.0f} ₸\n"
 
-        # Текущие остатки = начальный остаток из Справки + все операции из реестра
         summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
         total_all = 0.0
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
@@ -343,7 +363,6 @@ def ask_ai(question: str) -> str:
         result = resp.json()
         text = result["choices"][0]["message"].get("content") or "Нет ответа"
         text = re.sub(r'^(answer|Answer)\s*', '', text).strip()
-        # Убираем английские рассуждения — ищем первый абзац на русском
         lines = text.split("\n")
         eng_lines = [l for l in lines if l.strip() and re.search(r'[a-zA-Z]{3,}', l) and not re.search(r'[а-яА-Я]{3,}', l)]
         if len(eng_lines) > len(lines) / 3:
@@ -438,27 +457,20 @@ def find_account_in_справка(account_name: str, справка_data: list)
     return None, None
 
 def check_balance(account_name, bank_closing_balance):
-    """
-    Формула сверки:
-    Начальный остаток (Счета2026(Справка)) + ВСЕ операции по счёту из реестра за весь год = ДДС
-    Сравниваем с исходящим остатком из банка
-    """
     try:
         spreadsheet = get_spreadsheet()
 
-        # 1. Начальный остаток из Справки
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
         if initial_balance is None:
             return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
-        # 2. ВСЕ операции по этому счёту из реестра за весь год
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
         total_operations = 0.0
         ops_count = 0
-        for row in реестр_data[1:]:  # пропускаем заголовок
+        for row in реестр_data[1:]:
             if len(row) < 7:
                 continue
             acc_in_row = row[6].strip()
@@ -696,13 +708,11 @@ def process_bcc_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
-        # IBAN
         m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
         if m:
             iban = m.group(1).strip()
             account = IBAN_MAP.get(iban, iban)
 
-        # Входящий остаток
         m_open = re.search(r"[Кк]іріс қалдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_open:
             m_open = re.search(r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
@@ -711,7 +721,6 @@ def process_bcc_pdf(file_bytes):
         if m_open:
             opening_balance = parse_num(m_open.group(1))
 
-        # Исходящий остаток
         m_bal = re.search(r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
             m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
@@ -720,7 +729,6 @@ def process_bcc_pdf(file_bytes):
         if m_bal:
             closing_balance = parse_num(m_bal.group(1))
 
-        # Собираем ВСЕ строки таблицы со всех страниц
         all_table_rows = []
         for page in pdf.pages:
             tables = page.extract_tables()
@@ -729,7 +737,6 @@ def process_bcc_pdf(file_bytes):
                     if row and len(row) >= 12:
                         all_table_rows.append(list(row))
 
-        # Склеиваем строки разорванные между страницами
         merged_rows = []
         i = 0
         while i < len(all_table_rows):
@@ -756,7 +763,6 @@ def process_bcc_pdf(file_bytes):
                 merged_rows.append(row)
                 i += 1
 
-        # Парсим склеенные строки
         for row in merged_rows:
             if len(row) < 12:
                 continue
@@ -850,11 +856,9 @@ def process_halyk_pdf(file_bytes):
             amount = -amount
         d, mo, y = date_raw.split(".")
         date_str = f"{int(d):02d}/{mo}/{y}"
-        # Извлекаем номер документа из первой строки блока (2-е слово)
         doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
         doc_num = doc_num_m.group(1) if doc_num_m else ""
         clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
-        # Включаем номер документа в описание для надёжной дедупликации
         desc_with_docnum = f"{doc_num} {clean_desc}".strip() if doc_num else clean_desc
         rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
 
@@ -939,7 +943,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
 
-        # Строим словарь существующих ключей с номерами строк
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
             if len(row) >= 9:
@@ -947,7 +950,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 existing_key_to_row[key] = i
         existing_keys = set(existing_key_to_row.keys())
 
-        # Проверяем дубли
         dupe_sheet_rows = []
         dupe_rows = []
         for r in rows:
