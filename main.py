@@ -36,6 +36,8 @@ IBAN_MAP = {
     "KZ038562204137753855": "БЦК Имангазиева",
     "KZ448562204152575978": "БЦК Ип Серик",
     "KZ03601A231012849031": "Народный банк Ип Серик",
+    "KZ438562203234869084": "БЦК ТОО USD",
+    "KZ19722RU00001041014": "Каспи Депозит Ип Серик",
 }
 
 def get_spreadsheet():
@@ -281,6 +283,8 @@ ACCOUNT_SYNONYMS = {
     "голд":        ["голд", "gold"],
     "тоо":         ["тоо"],
     "ип":          ["ип", "ip"],
+    "депозит":     ["депозит", "deposit"],
+    "usd":         ["usd", "доллар"],
 }
 BANK_CONFLICT_GROUPS = [
     {"халык", "народный"},
@@ -494,7 +498,7 @@ def process_xlsx(file_bytes):
 
     return rows, account, closing_balance, opening_balance
 
-# ============ PDF Kaspi Gold ============
+# ============ PDF Kaspi (Gold + Депозит) ============
 def process_kaspi_gold_pdf(file_bytes):
     rows = []
     account = "Арман каспи голд"
@@ -504,63 +508,100 @@ def process_kaspi_gold_pdf(file_bytes):
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
         first_text = pdf.pages[0].extract_text() or ""
 
-        # Ищем оба остатка: "Доступно на ДД.ММ.ГГ + ХХХ ₸" — первое=входящий, второе=исходящий
         all_text = ""
         for p in pdf.pages:
             all_text += (p.extract_text() or "") + "\n"
 
-        matches = re.findall(
-            r"Доступно на \d{2}\.\d{2}[\.\d\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
-            all_text
-        )
-        logger.info(f"Kaspi Gold остатки найдены: {matches}")
+        # Определяем тип: Голд или Депозит
+        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
 
-        if len(matches) >= 2:
-            opening_balance = parse_num(matches[0])   # первое вхождение = входящий (13.05)
-            closing_balance = parse_num(matches[1])   # второе вхождение = исходящий (15.05)
-        elif len(matches) == 1:
-            closing_balance = parse_num(matches[0])
-
+        # Ищем IBAN
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
         if m_iban:
             iban = m_iban.group(1).strip()
             account = IBAN_MAP.get(iban, account)
-
-        if "KZ97722C000015235365" in first_text:
+        elif "KZ97722C000015235365" in first_text:
             account = IBAN_MAP.get("KZ97722C000015235365", account)
+        elif "KZ19722RU00001041014" in first_text:
+            account = IBAN_MAP.get("KZ19722RU00001041014", "Каспи Депозит Ип Серик")
 
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    if not row or len(row) < 3:
-                        continue
-                    date_cell = str(row[0] or "").strip()
-                    amount_cell = str(row[1] or "").strip()
-                    desc_cell = str(row[2] or "").strip() if len(row) > 2 else ""
-                    if len(row) > 3 and row[3]:
-                        desc_cell = desc_cell + " " + str(row[3]).strip()
-                    if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
-                        continue
-                    amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
-                    sign = 1
-                    if amount_clean.startswith("-"):
-                        sign = -1
-                        amount_clean = amount_clean[1:]
-                    elif amount_clean.startswith("+"):
-                        amount_clean = amount_clean[1:]
+        if is_deposit:
+            # Депозит: "На Депозите ДД.ММ.ГГ СУММА ₸"
+            matches = re.findall(
+                r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
+                all_text
+            )
+            logger.info(f"Kaspi Депозит остатки: {matches}")
+            if len(matches) >= 2:
+                opening_balance = parse_num(matches[0])
+                closing_balance = parse_num(matches[-1])
+            elif len(matches) == 1:
+                closing_balance = parse_num(matches[0])
+
+            # Парсим операции из текста (депозит не имеет таблицы)
+            lines = all_text.split("\n")
+            for line in lines:
+                line = line.strip()
+                # Формат: "ДД.ММ.ГГ +/-СУММА ₸ ОПЕРАЦИЯ ДЕТАЛИ"
+                m = re.match(
+                    r"^(\d{2}\.\d{2}\.\d{2,4})\s+([+\-][\d\s]+[,.][\d]+)\s*₸\s+(.+)$",
+                    line
+                )
+                if m:
+                    date_str = format_date(m.group(1))
+                    amount_raw = m.group(2).replace(" ", "").replace(",", ".")
                     try:
-                        amount = sign * float(amount_clean)
+                        amount = float(amount_raw)
                     except:
                         continue
-                    date_str = format_date(date_cell)
-                    rows.append(make_row(date_str, amount, account, desc_cell))
+                    desc = m.group(3).strip()
+                    rows.append(make_row(date_str, amount, account, desc))
+        else:
+            # Kaspi Gold: "Доступно на ДД.ММ.ГГ + СУММА ₸"
+            matches = re.findall(
+                r"Доступно на\s+\d{2}\.\d{2}[\.\d\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
+                all_text
+            )
+            logger.info(f"Kaspi Gold остатки: {matches}")
+            if len(matches) >= 2:
+                opening_balance = parse_num(matches[0])
+                closing_balance = parse_num(matches[1])
+            elif len(matches) == 1:
+                closing_balance = parse_num(matches[0])
 
-    # Если входящий не нашли в тексте — вычисляем математически
+            # Парсим таблицу операций
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if not row or len(row) < 3:
+                            continue
+                        date_cell = str(row[0] or "").strip()
+                        amount_cell = str(row[1] or "").strip()
+                        desc_cell = str(row[2] or "").strip() if len(row) > 2 else ""
+                        if len(row) > 3 and row[3]:
+                            desc_cell = desc_cell + " " + str(row[3]).strip()
+                        if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
+                            continue
+                        amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
+                        sign = 1
+                        if amount_clean.startswith("-"):
+                            sign = -1
+                            amount_clean = amount_clean[1:]
+                        elif amount_clean.startswith("+"):
+                            amount_clean = amount_clean[1:]
+                        try:
+                            amount = sign * float(amount_clean)
+                        except:
+                            continue
+                        date_str = format_date(date_cell)
+                        rows.append(make_row(date_str, amount, account, desc_cell))
+
+    # Если входящий не нашли — вычисляем математически
     if opening_balance is None and closing_balance is not None and rows:
         total_ops = sum(float(r[4]) for r in rows)
         opening_balance = round(closing_balance - total_ops, 2)
-        logger.info(f"Kaspi Gold opening_balance вычислен: {opening_balance}")
+        logger.info(f"Kaspi opening_balance вычислен: {opening_balance}")
 
     return rows, account, closing_balance, opening_balance
 
@@ -577,11 +618,13 @@ def process_bcc_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
+        # IBAN
         m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
         if m:
             iban = m.group(1).strip()
             account = IBAN_MAP.get(iban, iban)
 
+        # Входящий остаток
         m_open = re.search(r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_open:
             m_open = re.search(r"[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
@@ -590,12 +633,14 @@ def process_bcc_pdf(file_bytes):
         if m_open:
             opening_balance = parse_num(m_open.group(1))
 
+        # Исходящий остаток
         m_bal = re.search(r"[Шш]ығыс сальдо[^:]*?:\s*([\d\s]+,\d{2})", full_text)
         if not m_bal:
-            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+,\d{2})", full_text)
+            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.\s]\d{2})", full_text)
         if m_bal:
             closing_balance = parse_num(m_bal.group(1))
 
+        # Парсим таблицу операций
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
@@ -687,6 +732,23 @@ def process_halyk_pdf(file_bytes):
 
     return rows, account, closing_balance, opening_balance
 
+# ============ ОПРЕДЕЛЕНИЕ ТИПА PDF ============
+def detect_pdf_type(first_page_text):
+    if "По Депозиту" in first_page_text or "На Депозите" in first_page_text or "KZ19722RU" in first_page_text:
+        return "kaspi_deposit"
+    if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
+        return "kaspi_gold"
+    if "Kaspi Bank" in first_page_text or "CASPKZKA" in first_page_text:
+        return "kaspi_gold"
+    if "Народный Банк" in first_page_text or "Halyk" in first_page_text or "HSBKKZKX" in first_page_text:
+        return "halyk"
+    if ("ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text
+            or "KCJBKZKX" in first_page_text
+            or "KZ44856" in first_page_text or "KZ03856" in first_page_text
+            or "KZ50856" in first_page_text or "KZ43856" in first_page_text):
+        return "bcc"
+    return "kaspi_gold"
+
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
@@ -729,11 +791,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             with pdfplumber.open(BytesIO(file_bytes)) as pdf:
                 first_page_text = pdf.pages[0].extract_text() or ""
-            if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text or "Kaspi Bank" in first_page_text:
+
+            pdf_type = detect_pdf_type(first_page_text)
+            logger.info(f"PDF тип: {pdf_type}")
+
+            if pdf_type in ("kaspi_gold", "kaspi_deposit"):
                 rows, account, closing_balance, opening_balance = process_kaspi_gold_pdf(file_bytes)
-            elif "Народный Банк" in first_page_text or "Halyk" in first_page_text or "HSBKKZKX" in first_page_text:
+            elif pdf_type == "halyk":
                 rows, account, closing_balance, opening_balance = process_halyk_pdf(file_bytes)
-            elif "ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text or "KZ44856" in first_page_text or "KZ03856" in first_page_text or "KZ50856" in first_page_text:
+            elif pdf_type == "bcc":
                 rows, account, closing_balance, opening_balance = process_bcc_pdf(file_bytes)
             else:
                 rows, account, closing_balance, opening_balance = process_kaspi_gold_pdf(file_bytes)
@@ -812,7 +878,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n📋 Строки: {added_range}\n"
-
         msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
