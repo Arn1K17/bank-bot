@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import time
 import requests
 from io import BytesIO
 from datetime import datetime
@@ -194,13 +195,12 @@ def normalize_amount(amt_str):
 
 def make_dedup_key(date, amount, account, desc):
     """
-    Ключ дедупликации: дата + нормализованная сумма + счёт + номер документа из описания.
-    Номер документа уникален для каждой операции и стабилен при повторном чтении PDF.
+    Ключ дедупликации: дата + счёт + номер документа из описания.
+    Сумму НЕ используем — Google Sheets может возвращать округлённые значения через API.
+    Номер референса уникален для каждой операции.
     """
-    amt = normalize_amount(amount)
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip().lower()
 
-    # Извлекаем уникальный идентификатор операции из описания
     doc_num = ""
 
     # Референс (Народный банк, БЦК)
@@ -214,23 +214,25 @@ def make_dedup_key(date, amount, account, desc):
         if m_ubs:
             doc_num = m_ubs.group(1)
 
-    # NT- номер в начале (Народный банк: "NT-3935251031 ...")
+    # NT- номер в начале
     if not doc_num:
         m_nt = re.match(r'^nt-(\d+)', desc_clean)
         if m_nt:
             doc_num = m_nt.group(1)
 
-    # Номер документа в начале строки (цифровой)
+    # Цифровой номер документа в начале строки
     if not doc_num:
         m_num = re.match(r'^(\d{7,12})\b', desc_clean)
         if m_num:
             doc_num = m_num.group(1)
 
     if doc_num:
-        return (str(date).strip(), amt, str(account).strip(), doc_num)
+        # Если есть уникальный номер — сумма не нужна
+        return (str(date).strip(), str(account).strip(), doc_num)
 
-    # Если номера нет — первые 80 символов описания
-    return (str(date).strip(), amt, str(account).strip(), desc_clean[:80])
+    # Если номера нет — используем дату + счёт + нормализованную сумму + начало описания
+    amt = normalize_amount(amount)
+    return (str(date).strip(), str(account).strip(), amt, desc_clean[:80])
 
 # ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
@@ -940,8 +942,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Операции не найдены в файле")
             return
 
+        # Небольшая пауза чтобы Google Sheets успел обновить данные
+        time.sleep(2)
+        # Создаём свежее подключение чтобы избежать кэша gspread
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
+        logger.info(f"Всего строк в таблице: {len(existing_data)}")
 
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
