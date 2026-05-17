@@ -182,15 +182,16 @@ def make_row(date_str, amount, account, desc, supplier=""):
 def make_dedup_key(date, amount, account, desc):
     """
     Ключ дедупликации: дата + нормализованная сумма + счёт + первые 50 символов описания.
-    Это надёжнее чем просто дата+сумма+счёт — два одинаковых платежа в один день
-    с разным описанием НЕ будут считаться дублями.
+    Описание нормализуется: убираем лишние пробелы, переносы, приводим к нижнему регистру.
     """
     amt = str(amount).strip().replace(" ", "").replace(",", ".")
     try:
         amt = str(round(float(amt), 2))
     except:
         pass
-    desc_short = str(desc).strip()[:50]
+    # Нормализуем описание — убираем лишние пробелы и переносы
+    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip().lower()
+    desc_short = desc_clean[:50]
     return (str(date).strip(), amt, str(account).strip(), desc_short)
 
 # ============ OPENROUTER AI ============
@@ -832,7 +833,8 @@ def process_halyk_pdf(file_bytes):
             amount = -amount
         d, mo, y = date_raw.split(".")
         date_str = f"{int(d):02d}/{mo}/{y}"
-        rows.append(make_row(date_str, amount, account, full_desc[:200]))
+        clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
+        rows.append(make_row(date_str, amount, account, clean_desc[:200]))
 
     return rows, account, closing_balance, opening_balance
 
