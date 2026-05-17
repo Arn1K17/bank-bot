@@ -1011,6 +1011,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if key not in existing_keys:
                 logger.info(f"НОВАЯ СТРОКА: key={key}")
                 logger.info(f"  date={r[3]}, amount={r[4]}, account={r[6]}, desc={r[8]!r}")
+                # Ищем похожие строки в таблице по дате и счёту
+                for i, erow in enumerate(existing_data[1:], start=2):
+                    if len(erow) >= 9 and erow[3] == r[3] and erow[6] == r[6]:
+                        logger.info(f"  ПОХОЖАЯ В ТАБЛИЦЕ row={i}: amount={erow[4]!r}, desc={erow[8]!r}, key={make_dedup_key(erow[3], erow[4], erow[6], erow[8])}")
 
         def format_row_ranges(row_nums):
             if not row_nums:
