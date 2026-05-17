@@ -407,58 +407,67 @@ def find_account_in_справка(account_name: str, справка_data: list)
         return best_name, best_balance
     return None, None
 
-def check_balance(account_name, bank_closing_balance, current_rows, opening_balance=None):
+def check_balance(account_name, bank_closing_balance):
+    """
+    Формула сверки:
+    Начальный остаток (Счета2026(Справка)) + ВСЕ операции по счёту из реестра за весь год = ДДС
+    Сравниваем с исходящим остатком из банка
+    """
     try:
-        if opening_balance is not None:
-            initial_balance = opening_balance
-            source = "входящий остаток из выписки"
-        else:
-            spreadsheet = get_spreadsheet()
-            справка = spreadsheet.worksheet("Счета2026(Справка)")
-            справка_data = справка.get_all_values()
-            matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
-            if initial_balance is None:
-                return None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
-            source = "Справка (начало года)"
+        spreadsheet = get_spreadsheet()
 
+        # 1. Начальный остаток из Справки
+        справка = spreadsheet.worksheet("Счета2026(Справка)")
+        справка_data = справка.get_all_values()
+        matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
+        if initial_balance is None:
+            return None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
+
+        # 2. ВСЕ операции по этому счёту из реестра за весь год
+        реестр = spreadsheet.worksheet(SHEET_NAME)
+        реестр_data = реестр.get_all_values()
         total_operations = 0.0
-        for r in current_rows:
-            try:
-                total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
-            except:
-                pass
+        ops_count = 0
+        for row in реестр_data[1:]:  # пропускаем заголовок
+            if len(row) < 7:
+                continue
+            # col[6] = счёт, col[4] = сумма
+            acc_in_row = row[6].strip()
+            if acc_in_row.lower() == account_name.lower() or _account_similarity(account_name, acc_in_row) >= 0.85:
+                try:
+                    total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
+                    ops_count += 1
+                except:
+                    pass
 
         dds_balance = round(initial_balance + total_operations, 2)
         bank_balance = round(bank_closing_balance, 2)
 
         logger.info(
-            f"Сверка '{account_name}': {source}={initial_balance}, "
-            f"операций={len(current_rows)}, сумма={total_operations:.2f}, "
+            f"Сверка '{account_name}': Справка={initial_balance}, "
+            f"операций в реестре={ops_count}, сумма={total_operations:.2f}, "
             f"ДДС={dds_balance}, банк={bank_balance}"
         )
 
-        return dds_balance, bank_balance, initial_balance, source, None
+        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, None
 
     except Exception as e:
         logger.error(f"check_balance error: {e}")
-        return None, None, None, None, str(e)
+        return None, None, None, None, None, str(e)
 
 def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
     msg = ""
     if closing_balance is not None:
-        dds_balance, bank_balance, initial_balance, source, error = check_balance(
-            account, closing_balance, current_rows, opening_balance
-        )
+        result = check_balance(account, closing_balance)
+        if len(result) == 6:
+            dds_balance, bank_balance, initial_balance, ops_count, total_operations, error = result
+        else:
+            error = result[-1]
+            dds_balance = bank_balance = initial_balance = ops_count = total_operations = None
+
         if error:
             msg += f"\n⚠️ Сверка: {error}"
         else:
-            total_operations = 0.0
-            for r in current_rows:
-                try:
-                    total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
-                except:
-                    pass
-
             diff = round(bank_balance - dds_balance, 2)
             if abs(diff) < 1:
                 msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
@@ -469,8 +478,8 @@ def build_balance_msg(account, closing_balance, current_rows, opening_balance=No
                 msg += f"  Разница: {diff:,.2f} ₸"
 
             msg += f"\n\n📊 Расчёт ДДС:\n"
-            msg += f"  Начальный остаток ({source}): {initial_balance:,.2f} ₸\n"
-            msg += f"  + Сумма выписки ({len(current_rows)} строк): {total_operations:,.2f} ₸\n"
+            msg += f"  Начальный остаток (Счета2026(Справка)): {initial_balance:,.2f} ₸\n"
+            msg += f"  + Сальдо реестра ({ops_count} строк): {total_operations:,.2f} ₸\n"
             msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
             msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
     else:
