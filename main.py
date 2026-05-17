@@ -184,12 +184,29 @@ def get_sheets_data_for_ai():
         spreadsheet = get_spreadsheet()
         реестр = spreadsheet.worksheet(SHEET_NAME)
         data = реестр.get_all_values()
+
+        # Читаем начальные остатки из Справки
+        initial_balances = {}
+        try:
+            справка = spreadsheet.worksheet("Счета2026(Справка)")
+            справка_data = справка.get_all_values()
+            for row in справка_data:
+                if row and row[0].strip() and len(row) > 1:
+                    name = row[0].strip()
+                    bal = parse_справка_num(row[1])
+                    if bal is not None:
+                        initial_balances[name] = bal
+        except:
+            pass
+
         if len(data) < 2:
             return "Данных в таблице пока нет."
+
         rows = data[1:]
         month_totals = {}
         account_totals = {}
         article_totals = {}
+
         for row in rows:
             if len(row) < 8:
                 continue
@@ -207,23 +224,49 @@ def get_sheets_data_for_ai():
                     article_totals[article] = article_totals.get(article, 0) + amount
             except:
                 continue
+
         month_names = {
             "1":"Январь","2":"Февраль","3":"Март","4":"Апрель",
             "5":"Май","6":"Июнь","7":"Июль","8":"Август",
             "9":"Сентябрь","10":"Октябрь","11":"Ноябрь","12":"Декабрь"
         }
+
         summary = f"Всего строк в реестре: {len(rows)}\n\n"
+
         summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
         for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
             name = month_names.get(m, f"Месяц {m}")
             summary += f"  {name}: {month_totals[m]:,.0f} ₸\n"
-        summary += "\nОБОРОТЫ ПО СЧЕТАМ:\n"
-        for acc, total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
-            summary += f"  {acc}: {total:,.0f} ₸\n"
+
+        # Текущие остатки = начальный остаток из Справки + все операции из реестра
+        summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
+        total_all = 0.0
+        for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
+            # Ищем начальный остаток в Справке
+            initial = 0.0
+            best_score = 0.0
+            for name, bal in initial_balances.items():
+                if name.lower() == acc.lower():
+                    initial = bal
+                    break
+                score = _account_similarity(acc, name)
+                if score > best_score and score >= 0.7:
+                    best_score = score
+                    initial = bal
+            current = initial + ops_total
+            total_all += current
+            summary += f"  {acc}: {current:,.0f} ₸  (нач.остаток: {initial:,.0f} + обороты: {ops_total:,.0f})\n"
+        summary += f"  ИТОГО НА ВСЕХ СЧЕТАХ: {total_all:,.0f} ₸\n"
+
+        summary += "\nОБОРОТЫ ПО МЕСЯЦАМ ПО СЧЕТАМ (только операции без начального остатка):\n"
+        for acc, ops_total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
+            summary += f"  {acc}: {ops_total:,.0f} ₸\n"
+
         summary += "\nПО СТАТЬЯМ:\n"
         for art, total in sorted(article_totals.items(), key=lambda x: -abs(x[1])):
             if art:
                 summary += f"  {art}: {total:,.0f} ₸\n"
+
         return summary
     except Exception as e:
         return f"Ошибка получения данных: {e}"
