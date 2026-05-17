@@ -181,18 +181,35 @@ def make_row(date_str, amount, account, desc, supplier=""):
 # ============ ДЕДУПЛИКАЦИЯ ============
 def make_dedup_key(date, amount, account, desc):
     """
-    Ключ дедупликации: дата + нормализованная сумма + счёт + первые 50 символов описания.
-    Описание нормализуется: убираем лишние пробелы, переносы, приводим к нижнему регистру.
+    Ключ дедупликации: дата + сумма + счёт + номер документа из описания.
+    Номер документа уникален для каждой операции и стабилен при повторном чтении PDF.
     """
     amt = str(amount).strip().replace(" ", "").replace(",", ".")
     try:
         amt = str(round(float(amt), 2))
     except:
         pass
-    # Нормализуем описание — убираем лишние пробелы и переносы
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip().lower()
-    desc_short = desc_clean[:80]
-    return (str(date).strip(), amt, str(account).strip(), desc_short)
+    # Извлекаем уникальный идентификатор операции из описания
+    doc_num = ""
+    # Референс (Народный банк, БЦК)
+    m_ref = re.search(r'референс\s+(\d{8,12})', desc_clean)
+    if m_ref:
+        doc_num = m_ref.group(1)
+    # 00UBS номер (Народный банк)
+    if not doc_num:
+        m_ubs = re.search(r'00ubs(\d+)', desc_clean)
+        if m_ubs:
+            doc_num = m_ubs.group(1)
+    # Номер документа в начале строки (Народный банк: "70923980 народный банк...")
+    if not doc_num:
+        m_num = re.match(r'^(\d{7,10})\b', desc_clean)
+        if m_num:
+            doc_num = m_num.group(1)
+    if doc_num:
+        return (str(date).strip(), amt, str(account).strip(), doc_num)
+    # Если номера нет — первые 80 символов описания
+    return (str(date).strip(), amt, str(account).strip(), desc_clean[:80])
 
 # ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
@@ -833,8 +850,13 @@ def process_halyk_pdf(file_bytes):
             amount = -amount
         d, mo, y = date_raw.split(".")
         date_str = f"{int(d):02d}/{mo}/{y}"
+        # Извлекаем номер документа из первой строки блока (2-е слово)
+        doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
+        doc_num = doc_num_m.group(1) if doc_num_m else ""
         clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
-        rows.append(make_row(date_str, amount, account, clean_desc[:200]))
+        # Включаем номер документа в описание для надёжной дедупликации
+        desc_with_docnum = f"{doc_num} {clean_desc}".strip() if doc_num else clean_desc
+        rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
 
     return rows, account, closing_balance, opening_balance
 
