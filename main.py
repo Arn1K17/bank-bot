@@ -516,7 +516,7 @@ def check_balance(account_name, bank_closing_balance):
             if len(row) < 7:
                 continue
             acc_in_row = row[6].strip()
-            if acc_in_row.lower() == account_name.lower() or _account_similarity(account_name, acc_in_row) >= 0.85:
+            if acc_in_row.lower() == account_name.lower():
                 try:
                     total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
                     ops_count += 1
