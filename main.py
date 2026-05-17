@@ -1004,6 +1004,13 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dupe_sheet_rows.append(existing_key_to_row[key])
         dupes = len(dupe_rows)
 
+        # DEBUG: логируем строки которые НЕ найдены как дубли
+        for r in rows:
+            key = make_dedup_key(r[3], r[4], r[6], r[8])
+            if key not in existing_keys:
+                logger.info(f"НОВАЯ СТРОКА: key={key}")
+                logger.info(f"  date={r[3]}, amount={r[4]}, account={r[6]}, desc={r[8]!r}")
+
         def format_row_ranges(row_nums):
             if not row_nums:
                 return ""
