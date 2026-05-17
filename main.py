@@ -230,10 +230,11 @@ def _extract_doc_num(desc_clean: str) -> str:
 
 def make_dedup_key(date, amount, account, desc):
     """
-    Ключ дедупликации. Устойчив к старым строкам без числового префикса:
-    - Сначала пытается найти уникальный номер документа (в начале или внутри desc)
-    - Если номер найден — ключ (дата, счёт, doc_num), сумма не нужна
-    - Если нет — ключ (дата, счёт, сумма, desc[:80]) — для Kaspi Gold / Deposit
+    Ключ дедупликации:
+    - Если найден уникальный номер документа — ключ (дата, счёт, doc_num)
+    - Если нет — ключ (дата, счёт, сумма) без desc,
+      т.к. desc может незначительно отличаться между загрузками
+      (пробелы, обрезка, перенос строк) и ломать сравнение
     """
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
 
@@ -242,7 +243,7 @@ def make_dedup_key(date, amount, account, desc):
     if doc_num:
         return (str(date).strip(), str(account).strip(), doc_num)
 
-    # Нет номера (Kaspi Gold, Kaspi Deposit)
+    # Нет номера документа — используем только дату + счёт + сумму
     amt_str = str(amount).strip().replace(",", ".")
     try:
         f = round(float(amt_str), 2)
@@ -250,7 +251,7 @@ def make_dedup_key(date, amount, account, desc):
     except:
         amt = amt_str
 
-    return (str(date).strip(), str(account).strip(), amt, desc_clean[:80])
+    return (str(date).strip(), str(account).strip(), amt)
 
 # ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
