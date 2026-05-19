@@ -180,104 +180,59 @@ def make_row(date_str, amount, account, desc, supplier=""):
     ]
 
 # ============ ДЕДУПЛИКАЦИЯ ============
-def _extract_doc_num(desc_clean: str) -> str:
-    """
-    Извлекает уникальный номер документа из описания.
-    Ищет как в начале строки (новые строки с префиксом),
-    так и ВНУТРИ строки (старые строки без префикса).
-    """
-    desc_lower = desc_clean.lower()
-
-    # BCC: G2-XXXXXX в начале
-    m = re.match(r'^(g2-\d+)', desc_lower)
-    if m:
-        return m.group(1)
-
-    # BCC / Народный: NT-XXXXXX в начале
-    m = re.match(r'^(nt-?\d+)', desc_lower)
-    if m:
-        return m.group(1)
-
-    # Народный: "референс XXXXXXXXXX" в любом месте
-    m = re.search(r'референс\s+(\d{8,12})', desc_lower)
-    if m:
-        return "ref-" + m.group(1)
-
-    # Народный: "00UBS..." в любом месте
-    m = re.search(r'00ubs(\d+)', desc_lower)
-    if m:
-        return "ubs-" + m.group(1)
-
-    # Kaspi XLSX / BCC: 7-12 цифр в НАЧАЛЕ или ВНУТРИ desc
-    # Короткие числа 3-6 цифр НЕ используем — это порядковые номера строк выписки, не ID документа
-    m = re.match(r'^(\d{7,12})\b', desc_clean)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'(?<!\d)(\d{7,12})(?!\d)', desc_clean)
-    if m:
-        return m.group(1)
-
-    return ""
-
-
-def _normalize_amount(amount) -> str:
+def normalize_amount(amt_str):
     """
     Нормализует сумму для ключа дедупликации.
-    Google Sheets хранит суммы с запятой как разделителем тысяч: '8,000', '-63,945', '-2,547'
-    и округляет копейки: -32.3 → '-32', -392.43 → '-392'.
-    Алгоритм: убираем пробелы и неразрывные пробелы, затем убираем запятые (разделитель тысяч),
-    затем переводим в float и округляем до целого.
+    1500 и 1500.0 дают одинаковый результат "1500".
+    1500.50 -> "1500.5"
     """
-    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "")
-    # Запятая — всегда разделитель тысяч (формат Google Sheets), просто убираем
-    amt_str = amt_str.replace(",", "")
-    # Точка — десятичный разделитель
+    s = str(amt_str).strip().replace(" ", "").replace(",", ".")
     try:
-        f = float(amt_str)
-        return str(int(round(f)))
+        f = round(float(s), 2)
+        return str(int(f)) if f == int(f) else str(f)
     except:
-        return amt_str
-
+        return s
 
 def make_dedup_key(date, amount, account, desc):
     """
-    Ключ дедупликации:
-    - Если найден уникальный номер документа — ключ (дата, счёт, doc_num)
-    - Если нет — ключ (дата, счёт, сумма_округлённая)
+    Ключ дедупликации: дата + счёт + номер документа из описания.
+    Сумму НЕ используем — Google Sheets может возвращать округлённые значения через API.
+    Номер референса уникален для каждой операции.
     """
-    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
-    doc_num = _extract_doc_num(desc_clean)
+    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip().lower()
+
+    doc_num = ""
+
+    # Референс (Народный банк, БЦК)
+    m_ref = re.search(r'референс\s+(\d{8,12})', desc_clean)
+    if m_ref:
+        doc_num = m_ref.group(1)
+
+    # 00UBS номер (Народный банк)
+    if not doc_num:
+        m_ubs = re.search(r'00ubs(\d+)', desc_clean)
+        if m_ubs:
+            doc_num = m_ubs.group(1)
+
+    # NT- номер в начале
+    if not doc_num:
+        m_nt = re.match(r'^nt-(\d+)', desc_clean)
+        if m_nt:
+            doc_num = m_nt.group(1)
+
+    # Цифровой номер документа в начале строки
+    if not doc_num:
+        m_num = re.match(r'^(\d{7,12})\b', desc_clean)
+        if m_num:
+            doc_num = m_num.group(1)
 
     if doc_num:
+        # Если есть уникальный номер — сумма не нужна
         return (str(date).strip(), str(account).strip(), doc_num)
 
-    return (str(date).strip(), str(account).strip(), _normalize_amount(amount))
-
-
-def make_fallback_key(date, amount, account):
-    """
-    Запасной ключ только по (дата, счёт, сумма) — без doc_num и без desc.
-    Используется чтобы новая строка с doc_num в desc нашла старую строку в таблице
-    у которой того же doc_num не было (строки добавленные до введения префиксов).
-    """
-    return (str(date).strip(), str(account).strip(), _normalize_amount(amount))
-
-
-def is_duplicate(r, existing_keys):
-    """
-    Проверяет является ли строка r дублем.
-    Проверяет оба ключа: основной (с doc_num если есть) и fallback (только дата+счёт+сумма).
-    """
-    key = make_dedup_key(r[3], r[4], r[6], r[8])
-    if key in existing_keys:
-        return True
-    # Fallback: проверяем без doc_num — для совместимости со старыми строками таблицы
-    fb_key = make_fallback_key(r[3], r[4], r[6])
-    if fb_key in existing_keys:
-        return True
-    return False
-
+    # Если номера нет — используем дату + счёт + нормализованную сумму + начало описания
+    amt = normalize_amount(amount)
+    return (str(date).strip(), str(account).strip(), amt, desc_clean[:80])
 
 # ============ OPENROUTER AI ============
 def get_sheets_data_for_ai():
@@ -286,6 +241,7 @@ def get_sheets_data_for_ai():
         реестр = spreadsheet.worksheet(SHEET_NAME)
         data = реестр.get_all_values()
 
+        # Читаем начальные остатки из Справки
         initial_balances = {}
         try:
             справка = spreadsheet.worksheet("Счета2026(Справка)")
@@ -332,6 +288,7 @@ def get_sheets_data_for_ai():
         }
 
         summary = f"Всего строк в реестре: {len(rows)}\n\n"
+
         summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
         for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
             name = month_names.get(m, f"Месяц {m}")
@@ -482,6 +439,7 @@ def find_account_in_справка(account_name: str, справка_data: list)
         if candidate.lower() == search:
             balance = parse_справка_num(row[1] if len(row) > 1 else "")
             if balance is not None:
+                logger.info(f"Точное совпадение: '{candidate}' = {balance}")
                 return candidate, balance
     best_name = None
     best_balance = None
@@ -495,44 +453,61 @@ def find_account_in_справка(account_name: str, справка_data: list)
             best_score = score
             best_name = candidate
             best_balance = parse_справка_num(row[1] if len(row) > 1 else "")
+    logger.info(f"Нечёткий: '{best_name}' score={best_score:.2f} balance={best_balance}")
     if best_score >= 0.4 and best_balance is not None:
         return best_name, best_balance
     return None, None
 
-def check_balance(account_name, bank_closing_balance):
+def check_balance(account_name, bank_closing_balance, opening_balance_from_file=None, current_rows=None):
+    """
+    Сверка остатка.
+    Если есть opening_balance_from_file — используем его как начальный остаток
+    и считаем только операции из текущего файла (current_rows).
+    Иначе — берём из Справки и считаем все операции из реестра.
+    """
     try:
-        spreadsheet = get_spreadsheet()
-        справка = spreadsheet.worksheet("Счета2026(Справка)")
-        справка_data = справка.get_all_values()
-        matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
-        if initial_balance is None:
-            return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
-
-        реестр = spreadsheet.worksheet(SHEET_NAME)
-        реестр_data = реестр.get_all_values()
-        total_operations = 0.0
-        ops_count = 0
-        for row in реестр_data[1:]:
-            if len(row) < 7:
-                continue
-            acc_in_row = row[6].strip()
-            if acc_in_row.lower() == account_name.lower():
-                try:
-                    total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
-                    ops_count += 1
-                except:
-                    pass
-
-        dds_balance = round(initial_balance + total_operations, 2)
         bank_balance = round(bank_closing_balance, 2)
 
+        if opening_balance_from_file is not None and current_rows:
+            # Режим: входящий остаток из файла + операции только из файла
+            initial_balance = round(opening_balance_from_file, 2)
+            total_operations = sum(float(r[4]) for r in current_rows)
+            ops_count = len(current_rows)
+            dds_balance = round(initial_balance + total_operations, 2)
+            source = "файл (входящий остаток)"
+        else:
+            # Режим: начальный остаток из Справки + все операции из реестра
+            spreadsheet = get_spreadsheet()
+            справка = spreadsheet.worksheet("Счета2026(Справка)")
+            справка_data = справка.get_all_values()
+            matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
+            if initial_balance is None:
+                return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
+
+            реестр = spreadsheet.worksheet(SHEET_NAME)
+            реестр_data = реестр.get_all_values()
+            total_operations = 0.0
+            ops_count = 0
+            for row in реестр_data[1:]:
+                if len(row) < 7:
+                    continue
+                acc_in_row = row[6].strip()
+                if acc_in_row.lower() == account_name.lower():
+                    try:
+                        total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
+                        ops_count += 1
+                    except:
+                        pass
+            dds_balance = round(initial_balance + total_operations, 2)
+            source = "Счета2026(Справка)"
+
         logger.info(
-            f"Сверка '{account_name}': Справка={initial_balance}, "
+            f"Сверка '{account_name}': начало={initial_balance} ({source}), "
             f"операций={ops_count}, сумма={total_operations:.2f}, "
             f"ДДС={dds_balance}, банк={bank_balance}"
         )
 
-        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, None
+        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
 
     except Exception as e:
         logger.error(f"check_balance error: {e}")
@@ -541,11 +516,11 @@ def check_balance(account_name, bank_closing_balance):
 def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
     msg = ""
     if closing_balance is not None:
-        result = check_balance(account, closing_balance)
-        dds_balance, bank_balance, initial_balance, ops_count, total_operations, error = result
+        result = check_balance(account, closing_balance, opening_balance, current_rows)
+        dds_balance, bank_balance, initial_balance, ops_count, total_operations, source = result
 
-        if error:
-            msg += f"\n⚠️ Сверка: {error}"
+        if dds_balance is None:
+            msg += f"\n⚠️ Сверка: {source}"
         else:
             diff = round(bank_balance - dds_balance, 2)
             if abs(diff) < 1:
@@ -557,8 +532,8 @@ def build_balance_msg(account, closing_balance, current_rows, opening_balance=No
                 msg += f"  Разница: {diff:,.2f} ₸"
 
             msg += f"\n\n📊 Расчёт ДДС:\n"
-            msg += f"  Начальный остаток (Счета2026(Справка)): {initial_balance:,.2f} ₸\n"
-            msg += f"  + Сальдо реестра ({ops_count} строк): {total_operations:,.2f} ₸\n"
+            msg += f"  Начальный остаток ({source}): {initial_balance:,.2f} ₸\n"
+            msg += f"  + Операции файла ({ops_count} строк): {total_operations:,.2f} ₸\n"
             msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
             msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
     else:
@@ -618,13 +593,7 @@ def process_xlsx(file_bytes):
         debit = cell_val(ws.cell(row=row_idx, column=3))
         credit = cell_val(ws.cell(row=row_idx, column=4))
         supplier = str(cell_val(ws.cell(row=row_idx, column=5)) or "")
-        desc_raw = str(cell_val(ws.cell(row=row_idx, column=9)) or "")
-        doc_num_val = str(cell_val(ws.cell(row=row_idx, column=1)) or "").strip()
-        if doc_num_val and re.match(r'^\d{7,}$', doc_num_val):
-            desc = f"{doc_num_val} {desc_raw}".strip()
-        else:
-            desc = desc_raw
-
+        desc = str(cell_val(ws.cell(row=row_idx, column=9)))
         if not date_val:
             continue
         date_str = format_date(date_val)
@@ -670,7 +639,7 @@ def process_kaspi_gold_pdf(file_bytes):
         elif "KZ97722C000015235365" in first_text:
             account = IBAN_MAP.get("KZ97722C000015235365", account)
         elif "KZ19722RU00001041014" in first_text:
-            account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
+            account = IBAN_MAP.get("KZ19722RU00001041014", "Каспи Депозит Ип Серик")
 
         if is_deposit:
             matches = re.findall(
@@ -815,11 +784,10 @@ def process_bcc_pdf(file_bytes):
             if len(row) < 12:
                 continue
 
-            doc_num_cell = str(row[0] or "").replace("\n", "").strip()
             date_cell = str(row[1] or "").replace("\n", "").strip()
             debit_cell = str(row[7] or "").replace("\n", "").strip()
             credit_cell = str(row[8] or "").replace("\n", "").strip()
-            desc_raw = str(row[11] or "").replace("\n", " ").strip()
+            desc_cell = str(row[11] or "").replace("\n", " ").strip()
 
             if "итого" in date_cell.lower() or "жиынтығы" in date_cell.lower():
                 continue
@@ -839,12 +807,7 @@ def process_bcc_pdf(file_bytes):
             else:
                 continue
 
-            if doc_num_cell:
-                desc = f"{doc_num_cell} {desc_raw}".strip()
-            else:
-                desc = desc_raw
-
-            rows.append(make_row(date_str, amount, account, desc))
+            rows.append(make_row(date_str, amount, account, desc_cell))
 
     logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
     return rows, account, closing_balance, opening_balance
@@ -994,7 +957,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Операции не найдены в файле")
             return
 
+        # Небольшая пауза чтобы Google Sheets успел обновить данные
         time.sleep(2)
+        # Создаём свежее подключение чтобы избежать кэша gspread
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
         logger.info(f"Всего строк в таблице: {len(existing_data)}")
@@ -1002,55 +967,32 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
             if len(row) >= 9:
-                # Нормализуем amount: убираем запятые-разделители тысяч
-                raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
-                key = make_dedup_key(row[3], raw_amount, row[6], row[8])
+                key = make_dedup_key(row[3], row[4], row[6], row[8])
                 existing_key_to_row[key] = i
-
-                # Всегда добавляем fallback-ключ (дата, счёт, сумма) без doc_num
-                # Это обеспечивает совместимость новых строк с prefix со старыми без prefix
-                fb_key = make_fallback_key(row[3], raw_amount, row[6])
-                if fb_key not in existing_key_to_row:
-                    existing_key_to_row[fb_key] = i
-
         existing_keys = set(existing_key_to_row.keys())
 
-        # Логируем ключи для отладки
+        # ОТЛАДКА: логируем первые 3 ключа из таблицы и из файла
+        debug_table = [k for k in list(existing_keys)[:5] if account.lower() in k[2].lower()][:3]
+        debug_new = [make_dedup_key(r[3], r[4], r[6], r[8]) for r in rows[:3]]
+        logger.info(f"DEBUG TABLE KEYS (account={account}): {debug_table}")
+        logger.info(f"DEBUG NEW KEYS: {debug_new}")
+        # Проверяем первую строку нового файла есть ли в таблице
         first_new_key = make_dedup_key(rows[0][3], rows[0][4], rows[0][6], rows[0][8])
-        logger.info(f"Первый новый ключ: {first_new_key}")
-        logger.info(f"Есть в таблице: {first_new_key in existing_keys}")
+        logger.info(f"DEBUG first new key in existing: {first_new_key in existing_keys}")
 
         dupe_sheet_rows = []
         dupe_rows = []
         for r in rows:
-            # Используем is_duplicate которая проверяет и основной и fallback ключ
-            if is_duplicate(r, existing_keys):
+            key = make_dedup_key(r[3], r[4], r[6], r[8])
+            if key in existing_keys:
                 dupe_rows.append(r)
-                # Определяем номер строки в таблице (основной или fallback)
-                key = make_dedup_key(r[3], r[4], r[6], r[8])
-                fb_key = make_fallback_key(r[3], r[4], r[6])
-                sheet_row = existing_key_to_row.get(key) or existing_key_to_row.get(fb_key)
-                dupe_sheet_rows.append(sheet_row)
+                dupe_sheet_rows.append(existing_key_to_row[key])
         dupes = len(dupe_rows)
-
-        # DEBUG: логируем строки которые НЕ найдены как дубли
-        for r in rows:
-            if not is_duplicate(r, existing_keys):
-                key = make_dedup_key(r[3], r[4], r[6], r[8])
-                fb_key = make_fallback_key(r[3], r[4], r[6])
-                logger.info(f"НОВАЯ СТРОКА: key={key}, fb_key={fb_key}")
-                logger.info(f"  date={r[3]}, amount={r[4]}, account={r[6]}, desc={r[8]!r}")
-                for i, erow in enumerate(existing_data[1:], start=2):
-                    if len(erow) >= 9 and erow[3] == r[3] and erow[6] == r[6]:
-                        raw_a = str(erow[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
-                        logger.info(f"  ПОХОЖАЯ В ТАБЛИЦЕ row={i}: amount={erow[4]!r}, desc={erow[8]!r}, key={make_dedup_key(erow[3], raw_a, erow[6], erow[8])}, fb={make_fallback_key(erow[3], raw_a, erow[6])}")
 
         def format_row_ranges(row_nums):
             if not row_nums:
                 return ""
-            sorted_nums = sorted(n for n in row_nums if n is not None)
-            if not sorted_nums:
-                return ""
+            sorted_nums = sorted(row_nums)
             ranges = []
             start = end = sorted_nums[0]
             for n in sorted_nums[1:]:
@@ -1080,7 +1022,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if dupes > 0:
             dupe_range = format_row_ranges(dupe_sheet_rows)
-            new_rows = [r for r in rows if not is_duplicate(r, existing_keys)]
+            new_rows = [
+                r for r in rows
+                if make_dedup_key(r[3], r[4], r[6], r[8]) not in existing_keys
+            ]
             new_range = format_row_ranges(list(range(next_row, next_row + len(new_rows))))
             rows = new_rows
             await update.message.reply_text(
