@@ -469,10 +469,11 @@ def find_account_in_справка(account_name: str, справка_data: list)
         return best_name, best_balance
     return None, None
 
-def check_balance(account_name, bank_closing_balance):
+def check_balance(account_name, bank_closing_balance, extra_rows=None):
     """
     ДДС = начальный остаток из Счета2026(Справка) + все строки реестра по этому счёту.
-    Сравниваем с bank_closing_balance из файла выписки.
+    extra_rows — новые строки из текущего файла (уже добавлены в реестр, передаём явно
+    чтобы не зависеть от задержки Google Sheets).
     """
     try:
         bank_balance = round(bank_closing_balance, 2)
@@ -486,7 +487,7 @@ def check_balance(account_name, bank_closing_balance):
         if initial_balance is None:
             return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
-        # 2. Все операции по этому счёту из реестра
+        # 2. Все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
         total_operations = 0.0
@@ -500,6 +501,21 @@ def check_balance(account_name, bank_closing_balance):
                     ops_count += 1
                 except:
                     pass
+
+        # 3. Добавляем новые строки из текущего файла которые могли не успеть попасть в реестр
+        if extra_rows:
+            реестр_keys = set()
+            for row in реестр_data[1:]:
+                if len(row) >= 9:
+                    реестр_keys.add((row[3].strip(), row[6].strip().lower(), str(row[4]).strip()))
+            for r in extra_rows:
+                r_key = (r[3].strip(), r[6].strip().lower(), str(r[4]).strip())
+                if r_key not in реестр_keys and r[6].strip().lower() == account_name.lower():
+                    try:
+                        total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
+                        ops_count += 1
+                    except:
+                        pass
 
         total_operations = round(total_operations, 2)
         dds_balance = round(initial_balance + total_operations, 2)
@@ -519,8 +535,8 @@ def check_balance(account_name, bank_closing_balance):
 def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
     msg = ""
     if closing_balance is not None:
-        # Всегда используем реестр + Справка, игнорируем opening_balance из файла
-        result = check_balance(account, closing_balance)
+        # Передаём current_rows как extra_rows — на случай если Sheets ещё не обновился
+        result = check_balance(account, closing_balance, extra_rows=current_rows)
         dds_balance, bank_balance, initial_balance, ops_count, total_operations, source = result
 
         if dds_balance is None:
