@@ -507,6 +507,13 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
         logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк")
+        # Лог всех уникальных названий счетов в реестре
+        unique_accounts = set()
+        for row in реестр_data[1:]:
+            if len(row) >= 7 and row[6].strip():
+                unique_accounts.add(repr(row[6].strip()))
+        арман_variants = [a for a in unique_accounts if "арман" in a.lower() or "голд" in a.lower() or "gold" in a.lower()]
+        logger.info(f"check_balance: варианты 'Арман': {арман_variants}")
         total_operations = 0.0
         ops_count = 0
 
