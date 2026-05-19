@@ -282,13 +282,12 @@ def get_sheets_data_for_ai():
         account_totals = {}
         article_totals = {}
         for row in rows:
-            if len(row) < 8:
-                continue
+            # Безопасное извлечение по индексам, так как gspread обрезает пустые хвосты строк
+            month = row[1] if len(row) > 1 else ""
+            amount_str = row[4] if len(row) > 4 else "0"
+            account = row[6] if len(row) > 6 else ""
+            article = row[7] if len(row) > 7 else ""
             try:
-                month = row[1] if len(row) > 1 else ""
-                amount_str = row[4] if len(row) > 4 else "0"
-                account = row[6] if len(row) > 6 else ""
-                article = row[7] if len(row) > 7 else ""
                 amount = float(str(amount_str).replace(" ", "").replace("\xa0", "").replace(",", ".") or 0)
                 if month:
                     month_totals[month] = month_totals.get(month, 0) + amount
@@ -483,7 +482,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         t = clean_name(target)
         if r == t:
             return True
-        if _account_similarity(r, t) >= 0.75:  # Чуть снизили порог на всякий пожарный
+        if _account_similarity(r, t) >= 0.70:
             return True
         return False
 
@@ -505,47 +504,43 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         total_operations = 0.0
         ops_count = 0
-        short_rows = 0
-        skipped_rows_debug = []
 
-        # Извлекаем корни слов для жесткого фоллбэка, если matches подвёл
         target_bank = "каспи" if "каспи" in clean_name(account_name) else ("бцк" if "бцк" in clean_name(account_name) else "народный")
 
         for idx, row in enumerate(реестр_data[1:], start=2):
-            if len(row) < 7:
-                short_rows += 1
+            # КРИТИЧЕСКИЙ ФИКС: gspread урезает пустые ячейки в конце. Безопасно тянем данные по индексам.
+            if len(row) <= 4:
                 continue
+                
+            row_account = row[6] if len(row) > 6 else ""
+            row_amount_str = row[4] if len(row) > 4 else "0"
+            row_acc_clean = clean_name(row_account)
             
-            row_acc_clean = clean_name(row[6])
-            
-            # Проверяем строгое совпадение ИЛИ умное совпадение ИЛИ фоллбэк по банку (чтобы не терять строки!)
-            is_match = matches(row[6], account_name)
-            is_fallback_match = (target_bank in row_acc_clean) and (("серик" in clean_name(account_name) and "серик" in row_acc_clean) or 
-                                                                    ("тоо" in clean_name(account_name) and "тоо" in row_acc_clean) or
-                                                                    ("орынбаева" in clean_name(account_name) and "орынбаева" in row_acc_clean) or
-                                                                    ("имангазиева" in clean_name(account_name) and "имангазиева" in row_acc_clean))
+            is_match = matches(row_account, account_name)
+            is_fallback_match = (target_bank in row_acc_clean) and (
+                ("серик" in clean_name(account_name) and "серик" in row_acc_clean) or 
+                ("тоо" in clean_name(account_name) and "тоо" in row_acc_clean) or
+                ("орынбаева" in clean_name(account_name) and "орынбаева" in row_acc_clean) or
+                ("имангазиева" in clean_name(account_name) and "имангазиева" in row_acc_clean)
+            )
 
             if is_match or is_fallback_match:
                 try:
-                    amt_clean = str(row[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
+                    amt_clean = str(row_amount_str).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
                     total_operations += float(amt_clean)
                     ops_count += 1
                 except Exception as parse_err:
-                    logger.warning(f"Строка {idx}: не парсится сумма {repr(row[4])} -> {parse_err}")
-            else:
-                if row_acc_clean:
-                    skipped_rows_debug.append(f"Стр {idx}: счет='{row[6]}' сумма='{row[4]}'")
-
-        # ВЫВОДИМ ВСЕ ПРОПУЩЕННЫЕ СТРОКИ В КОНСОЛЬ RENDER — ТУТ БУДУТ ТВОИ 12 СТРОК
-        if skipped_rows_debug:
-            logger.info(f"‼ КРИТИЧЕСКИЙ ЛОГ ОШИБОК СВЕРКИ (ПРОПУЩЕНО {len(skipped_rows_debug)} СТРОК): {skipped_rows_debug[:30]}")
+                    logger.warning(f"Строка {idx}: не парсится сумма {repr(row_amount_str)} -> {parse_err}")
 
         # 3. Добавляем новые строки из кэша текущей сессии
         if extra_rows:
             реестр_keys = set()
             for row in реестр_data[1:]:
-                if len(row) >= 5:
-                    реестр_keys.add((clean_name(row[3]), clean_name(row[6]), str(row[4]).strip()))
+                r_date = row[3] if len(row) > 3 else ""
+                r_acc = row[6] if len(row) > 6 else ""
+                r_amt = row[4] if len(row) > 4 else ""
+                if r_date and r_acc:
+                    реестр_keys.add((clean_name(r_date), clean_name(r_acc), str(r_amt).strip()))
             for r in extra_rows:
                 r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
                 if r_key not in реестр_keys and (matches(r[6], account_name) or target_bank in clean_name(r[6])):
@@ -1022,14 +1017,19 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
-            if len(row) >= 9:
-                raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
-                key = make_dedup_key(row[3], raw_amount, row[6], row[8])
+            r_date = row[3] if len(row) > 3 else ""
+            r_amt = row[4] if len(row) > 4 else "0"
+            r_acc = row[6] if len(row) > 6 else ""
+            r_desc = row[8] if len(row) > 8 else ""
+            
+            if r_date and r_acc:
+                raw_amount = str(r_amt).replace(",", "").replace(" ", "").replace("\xa0", "")
+                key = make_dedup_key(r_date, raw_amount, r_acc, r_desc)
                 existing_key_to_row[key] = i
-                fb_key = make_fallback_key(row[3], raw_amount, row[6])
+                fb_key = make_fallback_key(r_date, raw_amount, r_acc)
                 if fb_key not in existing_key_to_row:
                     existing_key_to_row[fb_key] = i
-                exact_key = make_exact_key(row[3], raw_amount, row[6])
+                exact_key = make_exact_key(r_date, raw_amount, r_acc)
                 if exact_key not in existing_key_to_row:
                     existing_key_to_row[exact_key] = i
         existing_keys = set(existing_key_to_row.keys())
