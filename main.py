@@ -481,7 +481,6 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         target_clean = clean_name(target)
         names = {target_clean}
         
-        # Ищем совпадение в IBAN_MAP
         found_iban = None
         found_name = None
         
@@ -496,13 +495,11 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 break
         
         if found_iban and found_name:
-            # Добавляем все IBAN, которые ведут на то же имя
             for iban, iban_name in IBAN_MAP.items():
                 if clean_name(iban_name) == clean_name(found_name):
                     names.add(clean_name(iban))
                     names.add(clean_name(iban_name))
         
-        logger.info(f"get_all_account_names для '{target}': {names}")
         return names
 
     def matches(row_acc, target):
@@ -534,6 +531,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         total_operations = 0.0
         ops_count = 0
         matched_accounts = set()
+        all_accounts_in_sheet = {}  # ДЛЯ ОТЛАДКИ: считаем все счета
 
         for idx, row in enumerate(реестр_data[1:], start=2):
             if len(row) <= 4:
@@ -541,6 +539,10 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 
             row_account = row[6] if len(row) > 6 else ""
             row_amount_str = row[4] if len(row) > 4 else "0"
+            
+            # ОТЛАДКА: считаем все строки по всем счетам
+            acc_clean = clean_name(row_account) if row_account else "(пусто)"
+            all_accounts_in_sheet[acc_clean] = all_accounts_in_sheet.get(acc_clean, 0) + 1
             
             if matches(row_account, account_name):
                 try:
@@ -551,8 +553,21 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 except Exception as parse_err:
                     logger.warning(f"Строка {idx}: не парсится сумма {repr(row_amount_str)} -> {parse_err}")
 
-        logger.info(f"check_balance: найдено {ops_count} строк для счёта '{account_name}'")
-        logger.info(f"check_balance: варианты названий в таблице: {matched_accounts}")
+        # ОТЛАДКА: выводим в лог все счета и количество строк
+        logger.info(f"========== ВСЕ СЧЕТА В ТАБЛИЦЕ ==========")
+        total_rows_counted = 0
+        for acc, count in sorted(all_accounts_in_sheet.items(), key=lambda x: -x[1]):
+            logger.info(f"  '{acc}': {count} строк")
+            total_rows_counted += count
+        logger.info(f"  ВСЕГО СТРОК С НЕПУСТЫМ СЧЁТОМ: {total_rows_counted}")
+        logger.info(f"==========================================")
+        
+        # ОТЛАДКА: получаем все варианты названий для искомого счета
+        all_names = get_all_account_names(account_name)
+        logger.info(f"Искомый счёт: '{account_name}'")
+        logger.info(f"Все варианты названий для поиска: {all_names}")
+        logger.info(f"Найдено совпадений: {ops_count} строк")
+        logger.info(f"Найденные названия в таблице: {matched_accounts}")
 
         # 3. Добавляем новые строки из кэша текущей сессии
         if extra_rows:
@@ -577,7 +592,16 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         dds_balance = round(initial_balance + total_operations, 2)
         source = "Счета2026(Справка)"
 
-        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
+        # ОТЛАДКА: добавляем инфу о всех счетах в возвращаемый результат
+        debug_info = f"\n\n📋 ОТЛАДКА: Все счета в таблице:\n"
+        for acc, count in sorted(all_accounts_in_sheet.items(), key=lambda x: -x[1])[:10]:
+            debug_info += f"  '{acc}': {count} строк\n"
+        if len(all_accounts_in_sheet) > 10:
+            debug_info += f"  ... и ещё {len(all_accounts_in_sheet)-10} счетов\n"
+        debug_info += f"\n🔍 Искали: {all_names}"
+        debug_info += f"\n✅ Нашли: {matched_accounts if matched_accounts else 'НИЧЕГО'}"
+
+        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source + debug_info
 
     except Exception as e:
         logger.error(f"check_balance error: {e}")
