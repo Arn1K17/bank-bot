@@ -224,6 +224,19 @@ def _normalize_amount(amount) -> str:
     except:
         return amt_str
 
+def _normalize_amount_exact(amount) -> str:
+    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "")
+    amt_str = amt_str.replace(",", "")
+    try:
+        f = float(amt_str)
+        return f"{f:.2f}"
+    except:
+        return amt_str
+
+def make_exact_key(date, amount, account):
+    return (str(date).strip(), str(account).strip(), _normalize_amount_exact(amount))
+
+
 def make_dedup_key(date, amount, account, desc):
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
     doc_num = _extract_doc_num(desc_clean)
@@ -240,6 +253,9 @@ def is_duplicate(r, existing_keys):
         return True
     fb_key = make_fallback_key(r[3], r[4], r[6])
     if fb_key in existing_keys:
+        return True
+    exact_key = make_exact_key(r[3], r[4], r[6])
+    if exact_key in existing_keys:
         return True
     return False
 
@@ -965,6 +981,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 fb_key = make_fallback_key(row[3], raw_amount, row[6])
                 if fb_key not in existing_key_to_row:
                     existing_key_to_row[fb_key] = i
+                exact_key = make_exact_key(row[3], raw_amount, row[6])
+                if exact_key not in existing_key_to_row:
+                    existing_key_to_row[exact_key] = i
         existing_keys = set(existing_key_to_row.keys())
 
         first_new_key = make_dedup_key(rows[0][3], rows[0][4], rows[0][6], rows[0][8])
@@ -977,7 +996,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dupe_rows.append(r)
                 key = make_dedup_key(r[3], r[4], r[6], r[8])
                 fb_key = make_fallback_key(r[3], r[4], r[6])
-                sheet_row = existing_key_to_row.get(key) or existing_key_to_row.get(fb_key)
+                exact_key = make_exact_key(r[3], r[4], r[6])
+                sheet_row = existing_key_to_row.get(key) or existing_key_to_row.get(fb_key) or existing_key_to_row.get(exact_key)
                 dupe_sheet_rows.append(sheet_row)
         dupes = len(dupe_rows)
 
