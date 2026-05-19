@@ -630,7 +630,7 @@ def process_kaspi_gold_pdf(file_bytes):
         for p in pdf.pages:
             all_text += (p.extract_text() or "") + "\n"
 
-        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_page_text
+        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
 
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
         if m_iban:
