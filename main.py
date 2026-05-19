@@ -59,42 +59,33 @@ def format_date(val):
     if isinstance(val, datetime):
         return val.strftime("%m/%d/%Y")
     s = str(val).replace("\n", "").strip()
-    # Убираем время если есть
     s = re.sub(r'\s+\d{1,2}:\d{2}(:\d{2})?$', '', s).strip()
 
-    # Формат X/Y/YYYY — определяем кто день, кто месяц
     m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', s)
     if m:
         part1, part2, y = int(m.group(1)), int(m.group(2)), m.group(3)
         if part1 > 12:
-            # part1 точно день → MM/DD/YYYY
             return f"{part2:02d}/{part1:02d}/{y}"
         if part2 > 12:
-            # part2 точно день, part1 — месяц → уже MM/DD/YYYY
             return f"{part1:02d}/{part2:02d}/{y}"
-        # Обе части <= 12: xlsx Каспи всегда M/D/YYYY → оставляем как есть
         return f"{part1:02d}/{part2:02d}/{y}"
 
-    # Формат Д.М.ГГГГ или Д-М-ГГГГ (PDF: день.месяц.год)
     m = re.search(r"(\d{1,2})[.\-](\d{1,2})[.\-](\d{2,4})", s)
     if m:
         d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
         if len(y) == 2:
             y = "20" + y
-        # PDF даёт день.месяц.год → конвертируем в месяц/день/год
         return f"{mo:02d}/{d:02d}/{y}"
 
     return s
 
 def get_year_from_date(date_str):
-    # date_str: MM/DD/YYYY
     try:
         return date_str.split("/")[2]
     except:
         return ""
 
 def get_month_from_date(date_str):
-    # date_str: MM/DD/YYYY → месяц на позиции 0
     try:
         return int(date_str.split("/")[0])
     except:
@@ -462,39 +453,41 @@ def find_account_in_справка(account_name: str, справка_data: list)
         return best_name, best_balance
     return None, None
 
-def check_balance(account_name, bank_closing_balance, opening_balance_from_file=None, current_rows=None):
+def check_balance(account_name, bank_closing_balance):
+    """
+    ДДС = начальный остаток из Счета2026(Справка) + все строки реестра по этому счёту.
+    Сравниваем с bank_closing_balance из файла выписки.
+    """
     try:
         bank_balance = round(bank_closing_balance, 2)
 
-        if opening_balance_from_file is not None and current_rows is not None:
-            initial_balance = round(opening_balance_from_file, 2)
-            total_operations = round(sum(float(r[4]) for r in current_rows), 2)
-            ops_count = len(current_rows)
-            dds_balance = round(initial_balance + total_operations, 2)
-            source = "файл (входящий остаток)"
-        else:
-            spreadsheet = get_spreadsheet()
-            справка = spreadsheet.worksheet("Счета2026(Справка)")
-            справка_data = справка.get_all_values()
-            matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
-            if initial_balance is None:
-                return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
-            реестр = spreadsheet.worksheet(SHEET_NAME)
-            реестр_data = реестр.get_all_values()
-            total_operations = 0.0
-            ops_count = 0
-            for row in реестр_data[1:]:
-                if len(row) < 7:
-                    continue
-                if row[6].strip().lower() == account_name.lower():
-                    try:
-                        total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
-                        ops_count += 1
-                    except:
-                        pass
-            total_operations = round(total_operations, 2)
-            dds_balance = round(initial_balance + total_operations, 2)
-            source = "Счета2026(Справка)"
+        spreadsheet = get_spreadsheet()
+
+        # 1. Начальный остаток из Справки
+        справка = spreadsheet.worksheet("Счета2026(Справка)")
+        справка_data = справка.get_all_values()
+        matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
+        if initial_balance is None:
+            return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
+
+        # 2. Все операции по этому счёту из реестра
+        реестр = spreadsheet.worksheet(SHEET_NAME)
+        реестр_data = реестр.get_all_values()
+        total_operations = 0.0
+        ops_count = 0
+        for row in реестр_data[1:]:
+            if len(row) < 7:
+                continue
+            if row[6].strip().lower() == account_name.lower():
+                try:
+                    total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
+                    ops_count += 1
+                except:
+                    pass
+
+        total_operations = round(total_operations, 2)
+        dds_balance = round(initial_balance + total_operations, 2)
+        source = "Счета2026(Справка)"
 
         logger.info(
             f"Сверка '{account_name}': нач={initial_balance} ({source}), "
@@ -510,7 +503,8 @@ def check_balance(account_name, bank_closing_balance, opening_balance_from_file=
 def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
     msg = ""
     if closing_balance is not None:
-        result = check_balance(account, closing_balance, opening_balance, current_rows)
+        # Всегда используем реестр + Справка, игнорируем opening_balance из файла
+        result = check_balance(account, closing_balance)
         dds_balance, bank_balance, initial_balance, ops_count, total_operations, source = result
 
         if dds_balance is None:
@@ -793,7 +787,6 @@ def process_bcc_pdf(file_bytes):
             date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", date_cell)
             if not date_m:
                 continue
-            # BCC: день.месяц.год → MM/DD/YYYY
             day = int(date_m.group(1))
             month = int(date_m.group(2))
             year = date_m.group(3)
@@ -874,7 +867,6 @@ def process_halyk_pdf(file_bytes):
         desc_lower = full_desc.lower()
         if any(kw in desc_lower for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
             amount = -amount
-        # Halyk: день.месяц.год → MM/DD/YYYY
         d, mo, y = date_raw.split(".")
         date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
         doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
