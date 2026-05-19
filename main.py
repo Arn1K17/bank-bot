@@ -477,13 +477,10 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         return " ".join(words).lower()
 
     def get_all_account_names(target):
-        """Возвращает множество всех вариантов названия счёта (имена + IBAN)"""
         target_clean = clean_name(target)
         names = {target_clean}
-        
         found_iban = None
         found_name = None
-        
         for iban, iban_name in IBAN_MAP.items():
             if target_clean == clean_name(iban):
                 found_iban = iban
@@ -493,13 +490,11 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 found_iban = iban
                 found_name = iban_name
                 break
-        
         if found_iban and found_name:
             for iban, iban_name in IBAN_MAP.items():
                 if clean_name(iban_name) == clean_name(found_name):
                     names.add(clean_name(iban))
                     names.add(clean_name(iban_name))
-        
         return names
 
     def matches(row_acc, target):
@@ -516,22 +511,23 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         bank_balance = round(bank_closing_balance, 2)
         spreadsheet = get_spreadsheet()
 
-        # 1. Получаем начальный остаток из Справки
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
         if initial_balance is None:
             return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
-        # 2. Получаем все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
-        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк (включая заголовок)")
 
         total_operations = 0.0
         ops_count = 0
         matched_accounts = set()
-        all_accounts_in_sheet = {}  # ДЛЯ ОТЛАДКИ: считаем все счета
+        all_accounts_in_sheet = {}
+        
+        # НОВОЕ: собираем примеры НЕсовпавших строк
+        unmatched_examples = []
+        target_all_names = get_all_account_names(account_name)
 
         for idx, row in enumerate(реестр_data[1:], start=2):
             if len(row) <= 4:
@@ -539,8 +535,8 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 
             row_account = row[6] if len(row) > 6 else ""
             row_amount_str = row[4] if len(row) > 4 else "0"
+            row_date = row[3] if len(row) > 3 else ""
             
-            # ОТЛАДКА: считаем все строки по всем счетам
             acc_clean = clean_name(row_account) if row_account else "(пусто)"
             all_accounts_in_sheet[acc_clean] = all_accounts_in_sheet.get(acc_clean, 0) + 1
             
@@ -552,54 +548,56 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     matched_accounts.add(row_account.strip())
                 except Exception as parse_err:
                     logger.warning(f"Строка {idx}: не парсится сумма {repr(row_amount_str)} -> {parse_err}")
+            else:
+                # Проверяем, может ли эта строка относиться к искомому счёту
+                # по IBAN или частичному совпадению
+                if row_account and len(unmatched_examples) < 5:
+                    # Проверяем, есть ли IBAN в названии
+                    has_target_iban = any(iban.lower() in row_account.lower() for iban in IBAN_MAP.keys() 
+                                         if IBAN_MAP[iban] and clean_name(IBAN_MAP[iban]) in target_all_names)
+                    # Проверяем схожесть
+                    sim_score = max([_account_similarity(acc_clean, name) for name in target_all_names]) if target_all_names else 0
+                    
+                    if has_target_iban or sim_score > 0.3:
+                        unmatched_examples.append({
+                            'row': idx,
+                            'account': row_account.strip(),
+                            'date': row_date,
+                            'amount': row_amount_str,
+                            'clean': acc_clean,
+                            'has_iban': has_target_iban,
+                            'similarity': sim_score
+                        })
 
-        # ОТЛАДКА: выводим в лог все счета и количество строк
-        logger.info(f"========== ВСЕ СЧЕТА В ТАБЛИЦЕ ==========")
-        total_rows_counted = 0
-        for acc, count in sorted(all_accounts_in_sheet.items(), key=lambda x: -x[1]):
-            logger.info(f"  '{acc}': {count} строк")
-            total_rows_counted += count
-        logger.info(f"  ВСЕГО СТРОК С НЕПУСТЫМ СЧЁТОМ: {total_rows_counted}")
-        logger.info(f"==========================================")
+        # ОТЛАДКА: выводим информацию
+        debug_info = f"\n\n📋 ОТЛАДКА:\n"
+        debug_info += f"Всего строк в таблице: {len(реестр_data)-1}\n"
+        debug_info += f"Строк для '{account_name}': {ops_count}\n"
         
-        # ОТЛАДКА: получаем все варианты названий для искомого счета
-        all_names = get_all_account_names(account_name)
-        logger.info(f"Искомый счёт: '{account_name}'")
-        logger.info(f"Все варианты названий для поиска: {all_names}")
-        logger.info(f"Найдено совпадений: {ops_count} строк")
-        logger.info(f"Найденные названия в таблице: {matched_accounts}")
-
-        # 3. Добавляем новые строки из кэша текущей сессии
-        if extra_rows:
-            реестр_keys = set()
-            for row in реестр_data[1:]:
-                r_date = row[3] if len(row) > 3 else ""
-                r_acc = row[6] if len(row) > 6 else ""
-                r_amt = row[4] if len(row) > 4 else ""
-                if r_date and r_acc:
-                    реестр_keys.add((clean_name(r_date), clean_name(r_acc), str(r_amt).strip()))
-            for r in extra_rows:
-                r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
-                if r_key not in реестр_keys and matches(r[6], account_name):
-                    try:
-                        amt_clean = str(r[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
-                        total_operations += float(amt_clean)
-                        ops_count += 1
-                    except:
-                        pass
+        # Показываем все уникальные названия, которые похожи на искомый счёт
+        similar_accounts = []
+        for acc, count in all_accounts_in_sheet.items():
+            if acc and acc != "(пусто)":
+                sim = max([_account_similarity(acc, name) for name in target_all_names]) if target_all_names else 0
+                if sim > 0.3 or any(name in acc for name in target_all_names):
+                    similar_accounts.append((acc, count, sim))
+        
+        if similar_accounts:
+            debug_info += f"\n🔍 Похожие счета в таблице (возможно, это '{account_name}'):\n"
+            for acc, count, sim in sorted(similar_accounts, key=lambda x: -x[1])[:10]:
+                matched_mark = "✅" if acc in [clean_name(m) for m in matched_accounts] else "❌"
+                debug_info += f"  {matched_mark} '{acc}': {count} строк (схожесть: {sim:.2f})\n"
+        
+        # Показываем примеры несовпавших строк
+        if unmatched_examples:
+            debug_info += f"\n⚠️ Примеры НЕучтённых строк (возможно, это '{account_name}'):\n"
+            for ex in unmatched_examples:
+                debug_info += f"  Строка {ex['row']}: дата={ex['date']}, сумма={ex['amount']}, счёт='{ex['account']}'\n"
+                debug_info += f"    clean='{ex['clean']}', IBAN={ex['has_iban']}, схожесть={ex['similarity']:.2f}\n"
 
         total_operations = round(total_operations, 2)
         dds_balance = round(initial_balance + total_operations, 2)
         source = "Счета2026(Справка)"
-
-        # ОТЛАДКА: добавляем инфу о всех счетах в возвращаемый результат
-        debug_info = f"\n\n📋 ОТЛАДКА: Все счета в таблице:\n"
-        for acc, count in sorted(all_accounts_in_sheet.items(), key=lambda x: -x[1])[:10]:
-            debug_info += f"  '{acc}': {count} строк\n"
-        if len(all_accounts_in_sheet) > 10:
-            debug_info += f"  ... и ещё {len(all_accounts_in_sheet)-10} счетов\n"
-        debug_info += f"\n🔍 Искали: {all_names}"
-        debug_info += f"\n✅ Нашли: {matched_accounts if matched_accounts else 'НИЧЕГО'}"
 
         return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source + debug_info
 
