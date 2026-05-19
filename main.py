@@ -512,6 +512,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         total_operations = 0.0
         ops_count = 0
         short_rows = 0
+        no_match_samples = []  # ← ДЛЯ ОТЛАДКИ
 
         for row in реестр_data[1:]:
             if len(row) < 7:
@@ -521,10 +522,22 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 try:
                     total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
                     ops_count += 1
-                except:
-                    pass
+                except Exception as parse_err:
+                    logger.warning(f"check_balance: не парсится сумма row[4]={repr(row[4])} err={parse_err}")
+            else:
+                # Логируем первые 10 несовпадений
+                if len(no_match_samples) < 10:
+                    no_match_samples.append({
+                        "g": repr(row[6]),
+                        "e": repr(row[4]),
+                        "d": repr(row[3]),
+                    })
 
         logger.info(f"check_balance: пропущено коротких строк (len<7): {short_rows}")
+        if no_match_samples:
+            logger.info(f"check_balance: НЕ совпали первые примеры: {no_match_samples}")
+        else:
+            logger.info(f"check_balance: все строки прошли matches (нет несовпадений)")
 
         # 3. Добавляем новые строки которые могли не успеть попасть в Sheets
         if extra_rows:
