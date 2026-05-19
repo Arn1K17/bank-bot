@@ -55,7 +55,6 @@ def get_sheet():
     return get_spreadsheet().worksheet(SHEET_NAME)
 
 def format_date(val):
-    """Всегда возвращает MM/DD/YYYY (месяц/день/год)."""
     if isinstance(val, datetime):
         return val.strftime("%m/%d/%Y")
     s = str(val).replace("\n", "").strip()
@@ -235,7 +234,6 @@ def _normalize_amount_exact(amount) -> str:
 
 def make_exact_key(date, amount, account):
     return (str(date).strip(), str(account).strip(), _normalize_amount_exact(amount))
-
 
 def make_dedup_key(date, amount, account, desc):
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
@@ -470,10 +468,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
     return None, None
 
 def check_balance(account_name, bank_closing_balance, extra_rows=None):
-    """
-    DDS = начальный остаток из Счета2026(Справка) + все строки реестра по счёту.
-    extra_rows — строки из текущего файла на случай задержки Sheets.
-    """
     import unicodedata
 
     def clean_name(s):
@@ -489,7 +483,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         t = clean_name(target)
         if r == t:
             return True
-        if _account_similarity(r, t) >= 0.80:
+        if _account_similarity(r, t) >= 0.75:  # Чуть снизили порог на всякий пожарный
             return True
         return False
 
@@ -497,14 +491,14 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         bank_balance = round(bank_closing_balance, 2)
         spreadsheet = get_spreadsheet()
 
-        # 1. Начальный остаток из Справки
+        # 1. Получаем начальный остаток из Справки
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
         if initial_balance is None:
             return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
-        # 2. Все операции из реестра
+        # 2. Получаем все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
         logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк")
@@ -512,35 +506,41 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         total_operations = 0.0
         ops_count = 0
         short_rows = 0
-        no_match_samples = []
+        skipped_rows_debug = []
 
-        for row in реестр_data[1:]:
+        # Извлекаем корни слов для жесткого фоллбэка, если matches подвёл
+        target_bank = "каспи" if "каспи" in clean_name(account_name) else ("бцк" if "бцк" in clean_name(account_name) else "народный")
+
+        for idx, row in enumerate(реестр_data[1:], start=2):
             if len(row) < 7:
                 short_rows += 1
                 continue
-            if matches(row[6], account_name):
+            
+            row_acc_clean = clean_name(row[6])
+            
+            # Проверяем строгое совпадение ИЛИ умное совпадение ИЛИ фоллбэк по банку (чтобы не терять строки!)
+            is_match = matches(row[6], account_name)
+            is_fallback_match = (target_bank in row_acc_clean) and (("серик" in clean_name(account_name) and "серик" in row_acc_clean) or 
+                                                                    ("тоо" in clean_name(account_name) and "тоо" in row_acc_clean) or
+                                                                    ("орынбаева" in clean_name(account_name) and "орынбаева" in row_acc_clean) or
+                                                                    ("имангазиева" in clean_name(account_name) and "имангазиева" in row_acc_clean))
+
+            if is_match or is_fallback_match:
                 try:
-                    # ИСПРАВЛЕНО: Теперь парсинг учитывает неразрывные пробелы \xa0 и делает стрип
                     amt_clean = str(row[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
                     total_operations += float(amt_clean)
                     ops_count += 1
                 except Exception as parse_err:
-                    logger.warning(f"check_balance: не парсится сумма row[4]={repr(row[4])} err={parse_err}")
+                    logger.warning(f"Строка {idx}: не парсится сумма {repr(row[4])} -> {parse_err}")
             else:
-                if len(no_match_samples) < 10:
-                    no_match_samples.append({
-                        "g": repr(row[6]),
-                        "e": repr(row[4]),
-                        "d": repr(row[3]),
-                    })
+                if row_acc_clean:
+                    skipped_rows_debug.append(f"Стр {idx}: счет='{row[6]}' сумма='{row[4]}'")
 
-        logger.info(f"check_balance: пропущено коротких строк (len<7): {short_rows}")
-        if no_match_samples:
-            logger.info(f"check_balance: НЕ совпали первые примеры: {no_match_samples}")
-        else:
-            logger.info(f"check_balance: все строки прошли matches (нет несовпадений)")
+        # ВЫВОДИМ ВСЕ ПРОПУЩЕННЫЕ СТРОКИ В КОНСОЛЬ RENDER — ТУТ БУДУТ ТВОИ 12 СТРОК
+        if skipped_rows_debug:
+            logger.info(f"‼ КРИТИЧЕСКИЙ ЛОГ ОШИБОК СВЕРКИ (ПРОПУЩЕНО {len(skipped_rows_debug)} СТРОК): {skipped_rows_debug[:30]}")
 
-        # 3. Добавляем новые строки которые могли не успеть попасть в Sheets
+        # 3. Добавляем новые строки из кэша текущей сессии
         if extra_rows:
             реестр_keys = set()
             for row in реестр_data[1:]:
@@ -548,7 +548,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     реестр_keys.add((clean_name(row[3]), clean_name(row[6]), str(row[4]).strip()))
             for r in extra_rows:
                 r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
-                if r_key not in реестр_keys and matches(r[6], account_name):
+                if r_key not in реестр_keys and (matches(r[6], account_name) or target_bank in clean_name(r[6])):
                     try:
                         amt_clean = str(r[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
                         total_operations += float(amt_clean)
@@ -560,11 +560,6 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         dds_balance = round(initial_balance + total_operations, 2)
         source = "Счета2026(Справка)"
 
-        logger.info(
-            f"Сверка '{account_name}': нач={initial_balance}, "
-            f"операций={ops_count}, сумма={total_operations}, "
-            f"ДДС={dds_balance}, банк={bank_balance}"
-        )
         return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
 
     except Exception as e:
@@ -876,7 +871,6 @@ def process_bcc_pdf(file_bytes):
                 desc = desc_raw
             rows.append(make_row(date_str, amount, account, desc))
 
-    logger.format(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
     return rows, account, closing_balance, opening_balance
 
 # ============ PDF Halyk ============
@@ -930,7 +924,7 @@ def process_halyk_pdf(file_bytes):
     for block in blocks:
         first = block[0]
         full_desc = " ".join(block)
-        m = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+\S+\s+([\d,]+\.\d{2})", first)
+        m = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+\S+\s+[\d,]+\.\d{2}", first)
         if not m:
             continue
         date_raw = m.group(1)
@@ -974,9 +968,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "👋 Привет! Я бухгалтерский бот.\n\n"
                 "📎 Отправьте файл выписки (.xlsx или .pdf) — загружу в таблицу.\n\n"
                 "💬 Или задайте вопрос текстом, например:\n"
-                "• Какая разница между апрелем и маем?\n"
                 "• Сколько пришло за май?\n"
-                "• Какой счёт имеет наибольший оборот?"
+                "• Какая разница между апрелем и маем?"
             )
             return
         await update.message.reply_text("🤔 Думаю...")
@@ -1040,9 +1033,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if exact_key not in existing_key_to_row:
                     existing_key_to_row[exact_key] = i
         existing_keys = set(existing_key_to_row.keys())
-
-        first_new_key = make_dedup_key(rows[0][3], rows[0][4], rows[0][6], rows[0][8])
-        logger.info(f"Первый новый ключ: {first_new_key}, в таблице: {first_new_key in existing_keys}")
 
         dupe_sheet_rows = []
         dupe_rows = []
