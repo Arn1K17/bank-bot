@@ -41,6 +41,9 @@ IBAN_MAP = {
     "KZ19722RU00001041014": "Депозит Каспи Ип Серик",
 }
 
+# Обратный маппинг: имя счёта -> IBAN (для поиска)
+NAME_TO_IBAN = {v: k for k, v in IBAN_MAP.items()}
+
 def get_spreadsheet():
     creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
     creds = Credentials.from_service_account_info(
@@ -465,69 +468,83 @@ def find_account_in_справка(account_name: str, справка_data: list)
         return best_name, best_balance
     return None, None
 
-def check_balance(account_name, bank_closing_balance, extra_rows=None):
+def get_all_related_names(account_name: str) -> set:
+    """Возвращает ВСЕ возможные названия для счёта (имена + IBAN)"""
     import unicodedata
-
+    
     def clean_name(s):
         s = str(s)
         s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
         s = unicodedata.normalize("NFKC", s)
         s = s.strip("'\"")
-        words = s.split()
-        return " ".join(words).lower()
-
-    def get_all_account_names(target):
-        target_clean = clean_name(target)
-        names = {target_clean}
-        found_iban = None
-        found_name = None
+        return " ".join(s.split()).lower()
+    
+    target_clean = clean_name(account_name)
+    names = {target_clean}
+    
+    # Ищем совпадение в IBAN_MAP
+    found_name = None
+    for iban, iban_name in IBAN_MAP.items():
+        if target_clean == clean_name(iban) or target_clean == clean_name(iban_name):
+            found_name = iban_name
+            break
+    
+    if found_name:
+        # Добавляем все IBAN и имена, связанные с этим счётом
         for iban, iban_name in IBAN_MAP.items():
-            if target_clean == clean_name(iban):
-                found_iban = iban
-                found_name = iban_name
-                break
-            if target_clean == clean_name(iban_name):
-                found_iban = iban
-                found_name = iban_name
-                break
-        if found_iban and found_name:
-            for iban, iban_name in IBAN_MAP.items():
-                if clean_name(iban_name) == clean_name(found_name):
-                    names.add(clean_name(iban))
-                    names.add(clean_name(iban_name))
-        return names
+            if clean_name(iban_name) == clean_name(found_name):
+                names.add(clean_name(iban))
+                names.add(clean_name(iban_name))
+    
+    return names
 
-    def matches(row_acc, target):
-        r = clean_name(row_acc)
-        all_names = get_all_account_names(target)
-        if r in all_names:
-            return True
-        for name in all_names:
-            if _account_similarity(r, name) >= 0.70:
-                return True
+def is_same_account(name_in_sheet: str, target_account: str) -> bool:
+    """Проверяет, относится ли строка к искомому счёту"""
+    import unicodedata
+    
+    def clean_name(s):
+        s = str(s)
+        s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
+        s = unicodedata.normalize("NFKC", s)
+        s = s.strip("'\"")
+        return " ".join(s.split()).lower()
+    
+    if not name_in_sheet or not target_account:
         return False
+    
+    r = clean_name(name_in_sheet)
+    all_names = get_all_related_names(target_account)
+    
+    # Точное совпадение
+    if r in all_names:
+        return True
+    
+    # Проверка схожести
+    for name in all_names:
+        if _account_similarity(r, name) >= 0.70:
+            return True
+    
+    return False
 
+def check_balance(account_name, bank_closing_balance, extra_rows=None):
     try:
         bank_balance = round(bank_closing_balance, 2)
         spreadsheet = get_spreadsheet()
 
+        # 1. Получаем начальный остаток из Справки
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
         if initial_balance is None:
             return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
+        # 2. Получаем все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
 
         total_operations = 0.0
         ops_count = 0
         matched_accounts = set()
-        all_accounts_in_sheet = {}
-        
-        # НОВОЕ: собираем примеры НЕсовпавших строк
-        unmatched_examples = []
-        target_all_names = get_all_account_names(account_name)
 
         for idx, row in enumerate(реестр_data[1:], start=2):
             if len(row) <= 4:
@@ -535,12 +552,8 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 
             row_account = row[6] if len(row) > 6 else ""
             row_amount_str = row[4] if len(row) > 4 else "0"
-            row_date = row[3] if len(row) > 3 else ""
             
-            acc_clean = clean_name(row_account) if row_account else "(пусто)"
-            all_accounts_in_sheet[acc_clean] = all_accounts_in_sheet.get(acc_clean, 0) + 1
-            
-            if matches(row_account, account_name):
+            if is_same_account(row_account, account_name):
                 try:
                     amt_clean = str(row_amount_str).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
                     total_operations += float(amt_clean)
@@ -548,58 +561,40 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     matched_accounts.add(row_account.strip())
                 except Exception as parse_err:
                     logger.warning(f"Строка {idx}: не парсится сумма {repr(row_amount_str)} -> {parse_err}")
-            else:
-                # Проверяем, может ли эта строка относиться к искомому счёту
-                # по IBAN или частичному совпадению
-                if row_account and len(unmatched_examples) < 5:
-                    # Проверяем, есть ли IBAN в названии
-                    has_target_iban = any(iban.lower() in row_account.lower() for iban in IBAN_MAP.keys() 
-                                         if IBAN_MAP[iban] and clean_name(IBAN_MAP[iban]) in target_all_names)
-                    # Проверяем схожесть
-                    sim_score = max([_account_similarity(acc_clean, name) for name in target_all_names]) if target_all_names else 0
-                    
-                    if has_target_iban or sim_score > 0.3:
-                        unmatched_examples.append({
-                            'row': idx,
-                            'account': row_account.strip(),
-                            'date': row_date,
-                            'amount': row_amount_str,
-                            'clean': acc_clean,
-                            'has_iban': has_target_iban,
-                            'similarity': sim_score
-                        })
 
-        # ОТЛАДКА: выводим информацию
-        debug_info = f"\n\n📋 ОТЛАДКА:\n"
-        debug_info += f"Всего строк в таблице: {len(реестр_data)-1}\n"
-        debug_info += f"Строк для '{account_name}': {ops_count}\n"
-        
-        # Показываем все уникальные названия, которые похожи на искомый счёт
-        similar_accounts = []
-        for acc, count in all_accounts_in_sheet.items():
-            if acc and acc != "(пусто)":
-                sim = max([_account_similarity(acc, name) for name in target_all_names]) if target_all_names else 0
-                if sim > 0.3 or any(name in acc for name in target_all_names):
-                    similar_accounts.append((acc, count, sim))
-        
-        if similar_accounts:
-            debug_info += f"\n🔍 Похожие счета в таблице (возможно, это '{account_name}'):\n"
-            for acc, count, sim in sorted(similar_accounts, key=lambda x: -x[1])[:10]:
-                matched_mark = "✅" if acc in [clean_name(m) for m in matched_accounts] else "❌"
-                debug_info += f"  {matched_mark} '{acc}': {count} строк (схожесть: {sim:.2f})\n"
-        
-        # Показываем примеры несовпавших строк
-        if unmatched_examples:
-            debug_info += f"\n⚠️ Примеры НЕучтённых строк (возможно, это '{account_name}'):\n"
-            for ex in unmatched_examples:
-                debug_info += f"  Строка {ex['row']}: дата={ex['date']}, сумма={ex['amount']}, счёт='{ex['account']}'\n"
-                debug_info += f"    clean='{ex['clean']}', IBAN={ex['has_iban']}, схожесть={ex['similarity']:.2f}\n"
+        logger.info(f"check_balance: найдено {ops_count} строк для счёта '{account_name}'")
+        logger.info(f"check_balance: варианты названий: {matched_accounts}")
+
+        # 3. Добавляем новые строки из кэша текущей сессии
+        if extra_rows:
+            import unicodedata
+            def clean_name(s):
+                s = str(s).replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
+                s = unicodedata.normalize("NFKC", s)
+                return " ".join(s.split()).lower()
+            
+            реестр_keys = set()
+            for row in реестр_data[1:]:
+                r_date = row[3] if len(row) > 3 else ""
+                r_acc = row[6] if len(row) > 6 else ""
+                r_amt = row[4] if len(row) > 4 else ""
+                if r_date and r_acc:
+                    реестр_keys.add((clean_name(r_date), clean_name(r_acc), str(r_amt).strip()))
+            for r in extra_rows:
+                r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
+                if r_key not in реестр_keys and is_same_account(r[6], account_name):
+                    try:
+                        amt_clean = str(r[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
+                        total_operations += float(amt_clean)
+                        ops_count += 1
+                    except:
+                        pass
 
         total_operations = round(total_operations, 2)
         dds_balance = round(initial_balance + total_operations, 2)
         source = "Счета2026(Справка)"
 
-        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source + debug_info
+        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
 
     except Exception as e:
         logger.error(f"check_balance error: {e}")
@@ -632,6 +627,47 @@ def build_balance_msg(account, closing_balance, current_rows, opening_balance=No
     else:
         msg += "\n⚠️ Исходящий остаток не найден в файле"
     return msg
+
+# ============ ПОИСК IBAN В ТЕКСТЕ ============
+def find_iban_in_text(text: str) -> str:
+    """Ищет IBAN в тексте и возвращает название счёта из IBAN_MAP"""
+    # Ищем все KZ IBAN
+    iban_matches = re.findall(r'KZ\d{2}[A-Z0-9]{16,}', text)
+    for iban in iban_matches:
+        if iban in IBAN_MAP:
+            return IBAN_MAP[iban]
+    return None
+
+def find_account_for_operation(desc: str, default_account: str) -> str:
+    """
+    Пытается определить счёт по описанию операции.
+    Для Kaspi Gold/Pay ищет IBAN получателя/отправителя.
+    """
+    if not desc:
+        return default_account
+    
+    # Ищем IBAN в описании
+    account_from_iban = find_iban_in_text(desc)
+    if account_from_iban:
+        return account_from_iban
+    
+    # Ищем ключевые слова для Kaspi
+    desc_lower = desc.lower()
+    
+    # Kaspi Gold -> Арман каспи голд
+    if "kaspi gold" in desc_lower or "kz97722c" in desc_lower:
+        return "Арман каспи голд"
+    
+    # Kaspi Pay -> Каспи ТОО
+    if "kaspi pay" in desc_lower:
+        return "Каспи ТОО"
+    
+    # Переводы между счетами
+    for name, iban in NAME_TO_IBAN.items():
+        if iban.lower() in desc_lower:
+            return name
+    
+    return default_account
 
 # ============ XLSX ============
 def process_xlsx(file_bytes):
@@ -712,35 +748,47 @@ def process_xlsx(file_bytes):
                 continue
         else:
             continue
-        rows.append(make_row(date_str, amount, account, desc, supplier))
+        
+        # Определяем счёт для операции
+        op_account = find_account_for_operation(desc, account)
+        rows.append(make_row(date_str, amount, op_account, desc, supplier))
 
     return rows, account, closing_balance, opening_balance
 
 # ============ PDF Kaspi ============
-def process_kaspi_gold_pdf(file_bytes):
+def process_kaspi_pdf(file_bytes):
+    """Обработка всех типов Kaspi PDF (Gold, Депозит, Pay)"""
     rows = []
-    account = "Арман каспи голд"
+    account = None  # Будет определён из выписки
     closing_balance = None
     opening_balance = None
+    is_deposit = False
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        first_text = pdf.pages[0].extract_text() or ""
         all_text = ""
         for p in pdf.pages:
             all_text += (p.extract_text() or "") + "\n"
 
+        first_text = pdf.pages[0].extract_text() or ""
         is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
 
+        # Определяем основной счёт выписки по IBAN в шапке
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
         if m_iban:
             iban = m_iban.group(1).strip()
-            account = IBAN_MAP.get(iban, account)
-        elif "KZ97722C000015235365" in first_text:
-            account = IBAN_MAP.get("KZ97722C000015235365", account)
-        elif "KZ19722RU00001041014" in first_text:
-            account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
+            account = IBAN_MAP.get(iban, iban)
+        else:
+            # Пробуем найти любой известный IBAN
+            for iban in IBAN_MAP:
+                if iban in all_text[:500]:
+                    account = IBAN_MAP[iban]
+                    break
+        
+        if not account:
+            account = "Арман каспи голд"  # Запасной вариант
 
         if is_deposit:
+            # Депозит — обрабатываем как раньше, все строки на один счёт
             dep_matches = re.findall(
                 r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
                 all_text
@@ -766,8 +814,10 @@ def process_kaspi_gold_pdf(file_bytes):
                     except:
                         continue
                     desc = m.group(3).strip()
-                    rows.append(make_row(date_str, amount, account, desc))
+                    op_account = find_account_for_operation(desc, account)
+                    rows.append(make_row(date_str, amount, op_account, desc))
         else:
+            # Kaspi Gold / Pay — ищем остатки
             bal_matches = re.findall(
                 r"Доступно на\s+\d{2}\.\d{2}[\.\d\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
                 all_text
@@ -778,6 +828,7 @@ def process_kaspi_gold_pdf(file_bytes):
             elif len(bal_matches) == 1:
                 closing_balance = parse_num(bal_matches[0])
 
+            # Парсим таблицы
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
@@ -803,7 +854,10 @@ def process_kaspi_gold_pdf(file_bytes):
                         except:
                             continue
                         date_str = format_date(date_cell)
-                        rows.append(make_row(date_str, amount, account, desc_cell))
+                        
+                        # ВАЖНО: определяем счёт для КАЖДОЙ операции
+                        op_account = find_account_for_operation(desc_cell, account)
+                        rows.append(make_row(date_str, amount, op_account, desc_cell))
 
     if opening_balance is None and closing_balance is not None and rows:
         total_ops = sum(float(r[4]) for r in rows)
@@ -814,8 +868,7 @@ def process_kaspi_gold_pdf(file_bytes):
 # ============ PDF BCC ============
 def process_bcc_pdf(file_bytes):
     rows = []
-    iban = ""
-    account = "БЦК Ип Серик"
+    account = None
     closing_balance = None
     opening_balance = None
 
@@ -824,10 +877,21 @@ def process_bcc_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
+        # Определяем счёт по IBAN
         m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
         if m:
             iban = m.group(1).strip()
             account = IBAN_MAP.get(iban, iban)
+        
+        if not account:
+            # Ищем любой известный IBAN
+            for iban in IBAN_MAP:
+                if iban in full_text[:1000]:
+                    account = IBAN_MAP[iban]
+                    break
+        
+        if not account:
+            account = "БЦК Ип Серик"  # Запасной вариант
 
         m_open = re.search(r"[Кк]іріс қалдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_open:
@@ -908,7 +972,10 @@ def process_bcc_pdf(file_bytes):
                 desc = f"{doc_num_cell} {desc_raw}".strip()
             else:
                 desc = desc_raw
-            rows.append(make_row(date_str, amount, account, desc))
+            
+            # Определяем счёт для операции
+            op_account = find_account_for_operation(desc, account)
+            rows.append(make_row(date_str, amount, op_account, desc))
 
     return rows, account, closing_balance, opening_balance
 
@@ -924,7 +991,7 @@ def parse_kz_num(s):
 
 def process_halyk_pdf(file_bytes):
     rows = []
-    account = "Народный банк Ип Серик"
+    account = None
     closing_balance = None
     opening_balance = None
 
@@ -933,10 +1000,20 @@ def process_halyk_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
+    # Определяем счёт по IBAN
     m_iban = re.search(r"Счет\(Валюта\)[:\s]+(KZ[\w]+)", full_text)
     if m_iban:
         iban = m_iban.group(1).strip()
-        account = IBAN_MAP.get(iban, account)
+        account = IBAN_MAP.get(iban, iban)
+    
+    if not account:
+        for iban in IBAN_MAP:
+            if iban in full_text[:1000]:
+                account = IBAN_MAP[iban]
+                break
+    
+    if not account:
+        account = "Народный банк Ип Серик"
 
     m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
     if m_open:
@@ -963,32 +1040,37 @@ def process_halyk_pdf(file_bytes):
     for block in blocks:
         first = block[0]
         full_desc = " ".join(block)
-        m = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+\S+\s+[\d,]+\.\d{2}", first)
+        m = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+(\S+)\s+([\d,]+\.\d{2})", first)
         if not m:
             continue
         date_raw = m.group(1)
-        amount = parse_kz_num(m.group(2))
+        doc_num = m.group(2)
+        amount = parse_kz_num(m.group(3))
         desc_lower = full_desc.lower()
         if any(kw in desc_lower for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
             amount = -amount
         d, mo, y = date_raw.split(".")
         date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
-        doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
-        doc_num = doc_num_m.group(1) if doc_num_m else ""
         clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
         desc_with_docnum = f"{doc_num} {clean_desc}".strip() if doc_num else clean_desc
-        rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
+        desc = desc_with_docnum[:200]
+        
+        # Определяем счёт для операции
+        op_account = find_account_for_operation(desc, account)
+        rows.append(make_row(date_str, amount, op_account, desc))
 
     return rows, account, closing_balance, opening_balance
 
 # ============ ОПРЕДЕЛЕНИЕ ТИПА PDF ============
 def detect_pdf_type(first_page_text):
     if "По Депозиту" in first_page_text or "На Депозите" in first_page_text or "KZ19722RU" in first_page_text:
-        return "kaspi_deposit"
+        return "kaspi"
     if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
-        return "kaspi_gold"
+        return "kaspi"
     if "Kaspi Bank" in first_page_text or "CASPKZKA" in first_page_text:
-        return "kaspi_gold"
+        return "kaspi"
+    if "Kaspi Pay" in first_page_text:
+        return "kaspi"
     if "Народный Банк" in first_page_text or "Halyk" in first_page_text or "HSBKKZKX" in first_page_text:
         return "halyk"
     if ("ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text
@@ -996,7 +1078,7 @@ def detect_pdf_type(first_page_text):
             or "KZ44856" in first_page_text or "KZ03856" in first_page_text
             or "KZ50856" in first_page_text or "KZ43856" in first_page_text):
         return "bcc"
-    return "kaspi_gold"
+    return "kaspi"
 
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1033,6 +1115,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = bytes(await file.download_as_bytearray())
 
         opening_balance = None
+        account = None
 
         if fname.endswith(".xlsx"):
             rows, account, closing_balance, opening_balance = process_xlsx(file_bytes)
@@ -1041,18 +1124,35 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 first_page_text = pdf.pages[0].extract_text() or ""
             pdf_type = detect_pdf_type(first_page_text)
             logger.info(f"PDF тип: {pdf_type}")
-            if pdf_type in ("kaspi_gold", "kaspi_deposit"):
-                rows, account, closing_balance, opening_balance = process_kaspi_gold_pdf(file_bytes)
+            
+            if pdf_type == "kaspi":
+                rows, account, closing_balance, opening_balance = process_kaspi_pdf(file_bytes)
             elif pdf_type == "halyk":
                 rows, account, closing_balance, opening_balance = process_halyk_pdf(file_bytes)
             elif pdf_type == "bcc":
                 rows, account, closing_balance, opening_balance = process_bcc_pdf(file_bytes)
             else:
-                rows, account, closing_balance, opening_balance = process_kaspi_gold_pdf(file_bytes)
+                rows, account, closing_balance, opening_balance = process_kaspi_pdf(file_bytes)
 
         if not rows:
             await update.message.reply_text("❌ Операции не найдены в файле")
             return
+
+        # Показываем сводку по счетам
+        account_summary = {}
+        for r in rows:
+            acc = r[6]
+            try:
+                amt = float(r[4])
+            except:
+                amt = 0
+            account_summary[acc] = account_summary.get(acc, 0) + amt
+        
+        summary_msg = "📊 Распределение операций по счетам:\n"
+        for acc, total in sorted(account_summary.items(), key=lambda x: -abs(x[1])):
+            summary_msg += f"  {acc}: {total:,.0f} ₸\n"
+        
+        await update.message.reply_text(summary_msg)
 
         time.sleep(2)
         sheet = get_sheet()
@@ -1118,7 +1218,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Строки в таблице: {dupe_range}\n"
                 f"Ничего не добавлено."
             )
-            msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
+            if account and closing_balance:
+                msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
             msg += f"\n\n🔗 {SPREADSHEET_URL}"
             await update.message.reply_text(msg)
             return
@@ -1138,8 +1239,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
         added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
-        msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n📋 Строки: {added_range}\n"
-        msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
+        msg = f"✅ Готово! Добавлено {len(rows)} строк\n📋 Строки: {added_range}\n"
+        if account and closing_balance:
+            msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
 
