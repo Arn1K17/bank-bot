@@ -489,7 +489,11 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         # 2. Все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
-        реестр_data = реестр.get_all_values()
+        реестр_data = реестр.get("A:K") or []
+        реестр_data = реестр_data.get("values", реестр_data) if isinstance(реестр_data, dict) else реестр_data
+        if not реестр_data:
+            реестр_data = реестр.get_all_values()
+        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк (включая заголовок)")
         total_operations = 0.0
         ops_count = 0
 
