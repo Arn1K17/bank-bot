@@ -55,39 +55,48 @@ def get_sheet():
     return get_spreadsheet().worksheet(SHEET_NAME)
 
 def format_date(val):
+    """Всегда возвращает MM/DD/YYYY (месяц/день/год)."""
     if isinstance(val, datetime):
-        return val.strftime("%d/%m/%Y")
+        return val.strftime("%m/%d/%Y")
     s = str(val).replace("\n", "").strip()
-    # Убираем время если есть (например "15.05.2026 22:08:28")
+    # Убираем время если есть
     s = re.sub(r'\s+\d{1,2}:\d{2}(:\d{2})?$', '', s).strip()
-    # Формат М/Д/ГГГГ (американский из xlsx — например 5/17/2026)
+
+    # Формат X/Y/YYYY — определяем кто день, кто месяц
     m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', s)
     if m:
         part1, part2, y = int(m.group(1)), int(m.group(2)), m.group(3)
         if part1 > 12:
-            # Первая часть > 12 — это день/месяц/год
-            return f"{part1:02d}/{part2:02d}/{y}"
-        else:
-            # Американский формат: месяц/день/год → конвертируем в день/месяц/год
+            # part1 точно день → MM/DD/YYYY
             return f"{part2:02d}/{part1:02d}/{y}"
-    # Формат Д.М.ГГГГ или Д-М-ГГГГ
+        if part2 > 12:
+            # part2 точно день, part1 — месяц → уже MM/DD/YYYY
+            return f"{part1:02d}/{part2:02d}/{y}"
+        # Обе части <= 12: xlsx Каспи всегда M/D/YYYY → оставляем как есть
+        return f"{part1:02d}/{part2:02d}/{y}"
+
+    # Формат Д.М.ГГГГ или Д-М-ГГГГ (PDF: день.месяц.год)
     m = re.search(r"(\d{1,2})[.\-](\d{1,2})[.\-](\d{2,4})", s)
     if m:
-        d, mo, y = m.group(1), m.group(2), m.group(3)
+        d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
         if len(y) == 2:
             y = "20" + y
-        return f"{int(d):02d}/{int(mo):02d}/{y}"
+        # PDF даёт день.месяц.год → конвертируем в месяц/день/год
+        return f"{mo:02d}/{d:02d}/{y}"
+
     return s
 
 def get_year_from_date(date_str):
+    # date_str: MM/DD/YYYY
     try:
         return date_str.split("/")[2]
     except:
         return ""
 
 def get_month_from_date(date_str):
+    # date_str: MM/DD/YYYY → месяц на позиции 0
     try:
-        return int(date_str.split("/")[1])
+        return int(date_str.split("/")[0])
     except:
         return ""
 
@@ -107,13 +116,13 @@ def get_month_nachislenia(desc, date_str):
             if w in str(desc).lower():
                 return n
     try:
-        return int(date_str.split("/")[1])
+        return int(date_str.split("/")[0])
     except:
         return ""
 
 def get_week(date_str):
     try:
-        return datetime.strptime(date_str, "%d/%m/%Y").isocalendar()[1]
+        return datetime.strptime(date_str, "%m/%d/%Y").isocalendar()[1]
     except:
         return ""
 
@@ -454,11 +463,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
     return None, None
 
 def check_balance(account_name, bank_closing_balance, opening_balance_from_file=None, current_rows=None):
-    """
-    Сверка остатка.
-    Если есть opening_balance_from_file — используем входящий остаток из файла + операции файла.
-    Иначе — берём из Справки + все операции реестра.
-    """
     try:
         bank_balance = round(bank_closing_balance, 2)
 
@@ -626,7 +630,7 @@ def process_kaspi_gold_pdf(file_bytes):
         for p in pdf.pages:
             all_text += (p.extract_text() or "") + "\n"
 
-        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
+        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_page_text
 
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
         if m_iban:
@@ -789,7 +793,11 @@ def process_bcc_pdf(file_bytes):
             date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", date_cell)
             if not date_m:
                 continue
-            date_str = f"{int(date_m.group(1)):02d}/{date_m.group(2)}/{date_m.group(3)}"
+            # BCC: день.месяц.год → MM/DD/YYYY
+            day = int(date_m.group(1))
+            month = int(date_m.group(2))
+            year = date_m.group(3)
+            date_str = f"{month:02d}/{day:02d}/{year}"
             debit = parse_num(debit_cell)
             credit = parse_num(credit_cell)
             if debit > 0:
@@ -866,8 +874,9 @@ def process_halyk_pdf(file_bytes):
         desc_lower = full_desc.lower()
         if any(kw in desc_lower for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
             amount = -amount
+        # Halyk: день.месяц.год → MM/DD/YYYY
         d, mo, y = date_raw.split(".")
-        date_str = f"{int(d):02d}/{mo}/{y}"
+        date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
         doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
         doc_num = doc_num_m.group(1) if doc_num_m else ""
         clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
@@ -1024,7 +1033,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Добавляю {len(rows)} новых → строки {new_range}"
             )
 
-        rows.sort(key=lambda r: datetime.strptime(r[3], "%d/%m/%Y") if r[3] else datetime.min)
+        rows.sort(key=lambda r: datetime.strptime(r[3], "%m/%d/%Y") if r[3] else datetime.min)
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
         added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
