@@ -517,8 +517,10 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         total_operations = 0.0
         ops_count = 0
 
+        short_rows = 0
         for row in реестр_data[1:]:
             if len(row) < 7:
+                short_rows += 1
                 continue
             if matches(row[6], account_name):
                 try:
@@ -526,6 +528,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     ops_count += 1
                 except:
                     pass
+        logger.info(f"check_balance: пропущено коротких строк (len<7): {short_rows}")
 
         # 3. Добавляем новые строки которые могли не успеть попасть в Sheets
         if extra_rows:
