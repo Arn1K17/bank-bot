@@ -469,30 +469,29 @@ def find_account_in_справка(account_name: str, справка_data: list)
         return best_name, best_balance
     return None, None
 
+def _clean_name_for_match(s):
+    import unicodedata
+    s = str(s)
+    s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
+    s = unicodedata.normalize("NFKC", s)
+    s = s.strip("'\"")
+    words = s.split()
+    return " ".join(words).lower()
+
+def _matches_account(row_acc, target):
+    r = _clean_name_for_match(row_acc)
+    t = _clean_name_for_match(target)
+    if r == t:
+        return True
+    if _account_similarity(r, t) >= 0.80:
+        return True
+    return False
+
 def check_balance(account_name, bank_closing_balance, extra_rows=None):
     """
     DDS = начальный остаток из Счета2026(Справка) + все строки реестра по счёту.
     extra_rows — строки из текущего файла на случай задержки Sheets.
     """
-    import unicodedata
-
-    def clean_name(s):
-        s = str(s)
-        s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
-        s = unicodedata.normalize("NFKC", s)
-        s = s.strip("'\"")  # ← убираем апострофы и кавычки (Google Sheets текстовый маркер)
-        words = s.split()
-        return " ".join(words).lower()
-
-    def matches(row_acc, target):
-        r = clean_name(row_acc)
-        t = clean_name(target)
-        if r == t:
-            return True
-        if _account_similarity(r, t) >= 0.80:
-            return True
-        return False
-
     try:
         bank_balance = round(bank_closing_balance, 2)
         spreadsheet = get_spreadsheet()
@@ -512,20 +511,19 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         total_operations = 0.0
         ops_count = 0
         short_rows = 0
-        no_match_samples = []  # ← ДЛЯ ОТЛАДКИ
+        no_match_samples = []
 
         for row in реестр_data[1:]:
             if len(row) < 7:
                 short_rows += 1
                 continue
-            if matches(row[6], account_name):
+            if _matches_account(row[6], account_name):
                 try:
                     total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
                     ops_count += 1
                 except Exception as parse_err:
                     logger.warning(f"check_balance: не парсится сумма row[4]={repr(row[4])} err={parse_err}")
             else:
-                # Логируем первые 10 несовпадений
                 if len(no_match_samples) < 10:
                     no_match_samples.append({
                         "g": repr(row[6]),
@@ -544,10 +542,10 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
             реестр_keys = set()
             for row in реестр_data[1:]:
                 if len(row) >= 5:
-                    реестр_keys.add((clean_name(row[3]), clean_name(row[6]), str(row[4]).strip()))
+                    реестр_keys.add((_clean_name_for_match(row[3]), _clean_name_for_match(row[6]), str(row[4]).strip()))
             for r in extra_rows:
-                r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
-                if r_key not in реестр_keys and matches(r[6], account_name):
+                r_key = (_clean_name_for_match(r[3]), _clean_name_for_match(r[6]), str(r[4]).strip())
+                if r_key not in реестр_keys and _matches_account(r[6], account_name):
                     try:
                         total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
                         ops_count += 1
@@ -568,6 +566,19 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
     except Exception as e:
         logger.error(f"check_balance error: {e}")
         return None, None, None, None, None, str(e)
+
+
+def get_account_rows(account_name):
+    """Возвращает список (sheet_row_number, row_data) всех строк реестра по счёту."""
+    spreadsheet = get_spreadsheet()
+    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    matched = []
+    for i, row in enumerate(реестр_data[1:], start=2):
+        if len(row) >= 7 and _matches_account(row[6], account_name):
+            matched.append((i, row))
+    return matched
 
 
 def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
@@ -967,6 +978,7 @@ def detect_pdf_type(first_page_text):
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         question = update.message.text.strip()
+
         if question.startswith("/start"):
             await update.message.reply_text(
                 "👋 Привет! Я бухгалтерский бот.\n\n"
@@ -974,9 +986,75 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "💬 Или задайте вопрос текстом, например:\n"
                 "• Какая разница между апрелем и маем?\n"
                 "• Сколько пришло за май?\n"
-                "• Какой счёт имеет наибольший оборот?"
+                "• Какой счёт имеет наибольший оборот?\n\n"
+                "🔍 Команды:\n"
+                "/rows <название счёта> — показать все строки по счёту\n"
+                "Пример: /rows Каспи ТОО"
             )
             return
+
+        # ── /rows <account> ── вывод всех строк реестра по счёту ──────────────
+        if question.startswith("/rows"):
+            acc = question[5:].strip()
+            if not acc:
+                await update.message.reply_text(
+                    "Укажи название счёта после команды.\n"
+                    "Пример: /rows Каспи ТОО"
+                )
+                return
+
+            await update.message.reply_text(f"🔍 Ищу строки для «{acc}»...")
+            try:
+                matched = get_account_rows(acc)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Ошибка: {e}")
+                return
+
+            if not matched:
+                await update.message.reply_text(f"❌ Строк по счёту «{acc}» не найдено.")
+                return
+
+            # Считаем итог
+            total = 0.0
+            for _, row in matched:
+                try:
+                    total += float(str(row[4]).replace(" ", "").replace(",", "."))
+                except:
+                    pass
+
+            header = (
+                f"📋 Счёт: {acc}\n"
+                f"Найдено строк: {len(matched)}\n"
+                f"Сумма операций: {total:,.2f} ₸\n"
+                f"{'─'*35}\n"
+            )
+
+            # Формируем строки — разбиваем на части по 50 строк чтобы не превысить лимит Telegram
+            chunk_size = 50
+            chunks = [matched[i:i+chunk_size] for i in range(0, len(matched), chunk_size)]
+
+            for part_idx, chunk in enumerate(chunks):
+                lines = []
+                for sheet_row, row in chunk:
+                    date = row[3] if len(row) > 3 else ""
+                    amount = row[4] if len(row) > 4 else ""
+                    acc_name = row[6] if len(row) > 6 else ""
+                    desc = row[8] if len(row) > 8 else ""
+                    # Обрезаем описание до 40 символов
+                    desc_short = (desc[:40] + "…") if len(desc) > 40 else desc
+                    lines.append(f"#{sheet_row} | {date} | {amount} | {desc_short}")
+
+                part_text = "\n".join(lines)
+                if part_idx == 0:
+                    msg = header + part_text
+                else:
+                    msg = f"(продолжение {part_idx+1}/{len(chunks)})\n" + part_text
+
+                await update.message.reply_text(msg)
+
+            return
+        # ──────────────────────────────────────────────────────────────────────
+
         await update.message.reply_text("🤔 Думаю...")
         answer = ask_ai(question)
         await update.message.reply_text(answer)
