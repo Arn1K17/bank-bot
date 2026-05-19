@@ -492,10 +492,20 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         реестр_data = реестр.get_all_values()
         total_operations = 0.0
         ops_count = 0
+
+        def _row_matches_account(row_account: str, target: str) -> bool:
+            r = row_account.strip()
+            t = target.strip()
+            if r.lower() == t.lower():
+                return True
+            if _account_similarity(r, t) >= 0.85:
+                return True
+            return False
+
         for row in реестр_data[1:]:
             if len(row) < 7:
                 continue
-            if row[6].strip().lower() == account_name.lower():
+            if _row_matches_account(row[6], account_name):
                 try:
                     total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
                     ops_count += 1
@@ -510,7 +520,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     реестр_keys.add((row[3].strip(), row[6].strip().lower(), str(row[4]).strip()))
             for r in extra_rows:
                 r_key = (r[3].strip(), r[6].strip().lower(), str(r[4]).strip())
-                if r_key not in реестр_keys and r[6].strip().lower() == account_name.lower():
+                if r_key not in реестр_keys and _row_matches_account(r[6], account_name):
                     try:
                         total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
                         ops_count += 1
