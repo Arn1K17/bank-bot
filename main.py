@@ -282,7 +282,6 @@ def get_sheets_data_for_ai():
         account_totals = {}
         article_totals = {}
         for row in rows:
-            # Безопасное извлечение по индексам, так как gspread обрезает пустые хвосты строк
             month = row[1] if len(row) > 1 else ""
             amount_str = row[4] if len(row) > 4 else "0"
             account = row[6] if len(row) > 6 else ""
@@ -477,13 +476,43 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         words = s.split()
         return " ".join(words).lower()
 
+    def get_all_account_names(target):
+        """Возвращает множество всех вариантов названия счёта (имена + IBAN)"""
+        target_clean = clean_name(target)
+        names = {target_clean}
+        
+        # Ищем совпадение в IBAN_MAP
+        found_iban = None
+        found_name = None
+        
+        for iban, iban_name in IBAN_MAP.items():
+            if target_clean == clean_name(iban):
+                found_iban = iban
+                found_name = iban_name
+                break
+            if target_clean == clean_name(iban_name):
+                found_iban = iban
+                found_name = iban_name
+                break
+        
+        if found_iban and found_name:
+            # Добавляем все IBAN, которые ведут на то же имя
+            for iban, iban_name in IBAN_MAP.items():
+                if clean_name(iban_name) == clean_name(found_name):
+                    names.add(clean_name(iban))
+                    names.add(clean_name(iban_name))
+        
+        logger.info(f"get_all_account_names для '{target}': {names}")
+        return names
+
     def matches(row_acc, target):
         r = clean_name(row_acc)
-        t = clean_name(target)
-        if r == t:
+        all_names = get_all_account_names(target)
+        if r in all_names:
             return True
-        if _account_similarity(r, t) >= 0.70:
-            return True
+        for name in all_names:
+            if _account_similarity(r, name) >= 0.70:
+                return True
         return False
 
     try:
@@ -500,37 +529,30 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         # 2. Получаем все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
-        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк")
+        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк (включая заголовок)")
 
         total_operations = 0.0
         ops_count = 0
-
-        target_bank = "каспи" if "каспи" in clean_name(account_name) else ("бцк" if "бцк" in clean_name(account_name) else "народный")
+        matched_accounts = set()
 
         for idx, row in enumerate(реестр_data[1:], start=2):
-            # КРИТИЧЕСКИЙ ФИКС: gspread урезает пустые ячейки в конце. Безопасно тянем данные по индексам.
             if len(row) <= 4:
                 continue
                 
             row_account = row[6] if len(row) > 6 else ""
             row_amount_str = row[4] if len(row) > 4 else "0"
-            row_acc_clean = clean_name(row_account)
             
-            is_match = matches(row_account, account_name)
-            is_fallback_match = (target_bank in row_acc_clean) and (
-                ("серик" in clean_name(account_name) and "серик" in row_acc_clean) or 
-                ("тоо" in clean_name(account_name) and "тоо" in row_acc_clean) or
-                ("орынбаева" in clean_name(account_name) and "орынбаева" in row_acc_clean) or
-                ("имангазиева" in clean_name(account_name) and "имангазиева" in row_acc_clean)
-            )
-
-            if is_match or is_fallback_match:
+            if matches(row_account, account_name):
                 try:
                     amt_clean = str(row_amount_str).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
                     total_operations += float(amt_clean)
                     ops_count += 1
+                    matched_accounts.add(row_account.strip())
                 except Exception as parse_err:
                     logger.warning(f"Строка {idx}: не парсится сумма {repr(row_amount_str)} -> {parse_err}")
+
+        logger.info(f"check_balance: найдено {ops_count} строк для счёта '{account_name}'")
+        logger.info(f"check_balance: варианты названий в таблице: {matched_accounts}")
 
         # 3. Добавляем новые строки из кэша текущей сессии
         if extra_rows:
@@ -543,7 +565,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     реестр_keys.add((clean_name(r_date), clean_name(r_acc), str(r_amt).strip()))
             for r in extra_rows:
                 r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
-                if r_key not in реестр_keys and (matches(r[6], account_name) or target_bank in clean_name(r[6])):
+                if r_key not in реестр_keys and matches(r[6], account_name):
                     try:
                         amt_clean = str(r[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
                         total_operations += float(amt_clean)
