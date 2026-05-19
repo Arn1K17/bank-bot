@@ -291,7 +291,7 @@ def get_sheets_data_for_ai():
                 amount_str = row[4] if len(row) > 4 else "0"
                 account = row[6] if len(row) > 6 else ""
                 article = row[7] if len(row) > 7 else ""
-                amount = float(str(amount_str).replace(" ", "").replace(",", ".") or 0)
+                amount = float(str(amount_str).replace(" ", "").replace("\xa0", "").replace(",", ".") or 0)
                 if month:
                     month_totals[month] = month_totals.get(month, 0) + amount
                 if account:
@@ -480,7 +480,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         s = str(s)
         s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
         s = unicodedata.normalize("NFKC", s)
-        s = s.strip("'\"")  # ← убираем апострофы и кавычки (Google Sheets текстовый маркер)
+        s = s.strip("'\"")
         words = s.split()
         return " ".join(words).lower()
 
@@ -512,7 +512,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         total_operations = 0.0
         ops_count = 0
         short_rows = 0
-        no_match_samples = []  # ← ДЛЯ ОТЛАДКИ
+        no_match_samples = []
 
         for row in реестр_data[1:]:
             if len(row) < 7:
@@ -520,12 +520,13 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 continue
             if matches(row[6], account_name):
                 try:
-                    total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
+                    # ИСПРАВЛЕНО: Теперь парсинг учитывает неразрывные пробелы \xa0 и делает стрип
+                    amt_clean = str(row[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
+                    total_operations += float(amt_clean)
                     ops_count += 1
                 except Exception as parse_err:
                     logger.warning(f"check_balance: не парсится сумма row[4]={repr(row[4])} err={parse_err}")
             else:
-                # Логируем первые 10 несовпадений
                 if len(no_match_samples) < 10:
                     no_match_samples.append({
                         "g": repr(row[6]),
@@ -549,7 +550,8 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
                 if r_key not in реестр_keys and matches(r[6], account_name):
                     try:
-                        total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
+                        amt_clean = str(r[4]).replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
+                        total_operations += float(amt_clean)
                         ops_count += 1
                     except:
                         pass
@@ -610,13 +612,13 @@ def process_xlsx(file_bytes):
 
     opening_val = cell_val(ws.cell(row=9, column=3))
     try:
-        opening_balance = float(str(opening_val).replace(" ", "").replace(",", "."))
+        opening_balance = float(str(opening_val).replace(" ", "").replace("\xa0", "").replace(",", "."))
     except:
         opening_balance = None
 
     closing_val = cell_val(ws.cell(row=10, column=3))
     try:
-        closing_balance = float(str(closing_val).replace(" ", "").replace(",", "."))
+        closing_balance = float(str(closing_val).replace(" ", "").replace("\xa0", "").replace(",", "."))
     except:
         pass
 
@@ -629,7 +631,7 @@ def process_xlsx(file_bytes):
                         v = cell_val(ws.cell(row=row_idx, column=c))
                         if v:
                             try:
-                                closing_balance = float(str(v).replace(" ", "").replace(",", "."))
+                                closing_balance = float(str(v).replace(" ", "").replace("\xa0", "").replace(",", "."))
                                 break
                             except:
                                 pass
@@ -666,12 +668,12 @@ def process_xlsx(file_bytes):
         has_c = credit not in ("", None, "None")
         if has_d:
             try:
-                amount = -float(str(debit).replace(" ", "").replace(",", "."))
+                amount = -float(str(debit).replace(" ", "").replace("\xa0", "").replace(",", "."))
             except:
                 continue
         elif has_c:
             try:
-                amount = float(str(credit).replace(" ", "").replace(",", "."))
+                amount = float(str(credit).replace(" ", "").replace("\xa0", "").replace(",", "."))
             except:
                 continue
         else:
@@ -874,7 +876,7 @@ def process_bcc_pdf(file_bytes):
                 desc = desc_raw
             rows.append(make_row(date_str, amount, account, desc))
 
-    logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
+    logger.format(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
     return rows, account, closing_balance, opening_balance
 
 # ============ PDF Halyk ============
