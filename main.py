@@ -471,13 +471,29 @@ def find_account_in_справка(account_name: str, справка_data: list)
 
 def check_balance(account_name, bank_closing_balance, extra_rows=None):
     """
-    ДДС = начальный остаток из Счета2026(Справка) + все строки реестра по этому счёту.
-    extra_rows — новые строки из текущего файла (уже добавлены в реестр, передаём явно
-    чтобы не зависеть от задержки Google Sheets).
+    DDS = начальный остаток из Счета2026(Справка) + все строки реестра по счёту.
+    extra_rows — строки из текущего файла на случай задержки Sheets.
     """
+    import unicodedata
+
+    def clean_name(s):
+        s = str(s)
+        s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
+        s = unicodedata.normalize("NFKC", s)
+        words = s.split()
+        return " ".join(words).lower()
+
+    def matches(row_acc, target):
+        r = clean_name(row_acc)
+        t = clean_name(target)
+        if r == t:
+            return True
+        if _account_similarity(r, t) >= 0.80:
+            return True
+        return False
+
     try:
         bank_balance = round(bank_closing_balance, 2)
-
         spreadsheet = get_spreadsheet()
 
         # 1. Начальный остаток из Справки
@@ -489,42 +505,30 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         # 2. Все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
-        реестр_data = реестр.get("A:K") or []
-        реестр_data = реестр_data.get("values", реестр_data) if isinstance(реестр_data, dict) else реестр_data
-        if not реестр_data:
-            реестр_data = реестр.get_all_values()
-        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк (включая заголовок)")
+        реестр_data = реестр.get_all_values()
+        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк")
         total_operations = 0.0
         ops_count = 0
-
-        def _row_matches_account(row_account: str, target: str) -> bool:
-            r = row_account.strip()
-            t = target.strip()
-            if r.lower() == t.lower():
-                return True
-            if _account_similarity(r, t) >= 0.85:
-                return True
-            return False
 
         for row in реестр_data[1:]:
             if len(row) < 7:
                 continue
-            if _row_matches_account(row[6], account_name):
+            if matches(row[6], account_name):
                 try:
                     total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
                     ops_count += 1
                 except:
                     pass
 
-        # 3. Добавляем новые строки из текущего файла которые могли не успеть попасть в реестр
+        # 3. Добавляем новые строки которые могли не успеть попасть в Sheets
         if extra_rows:
             реестр_keys = set()
             for row in реестр_data[1:]:
-                if len(row) >= 9:
-                    реестр_keys.add((row[3].strip(), row[6].strip().lower(), str(row[4]).strip()))
+                if len(row) >= 5:
+                    реестр_keys.add((clean_name(row[3]), clean_name(row[6]), str(row[4]).strip()))
             for r in extra_rows:
-                r_key = (r[3].strip(), r[6].strip().lower(), str(r[4]).strip())
-                if r_key not in реестр_keys and _row_matches_account(r[6], account_name):
+                r_key = (clean_name(r[3]), clean_name(r[6]), str(r[4]).strip())
+                if r_key not in реестр_keys and matches(r[6], account_name):
                     try:
                         total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
                         ops_count += 1
@@ -536,7 +540,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         source = "Счета2026(Справка)"
 
         logger.info(
-            f"Сверка '{account_name}': нач={initial_balance} ({source}), "
+            f"Сверка '{account_name}': нач={initial_balance}, "
             f"операций={ops_count}, сумма={total_operations}, "
             f"ДДС={dds_balance}, банк={bank_balance}"
         )
@@ -545,6 +549,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
     except Exception as e:
         logger.error(f"check_balance error: {e}")
         return None, None, None, None, None, str(e)
+
 
 def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
     msg = ""
