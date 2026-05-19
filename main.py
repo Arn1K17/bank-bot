@@ -480,6 +480,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         s = str(s)
         s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
         s = unicodedata.normalize("NFKC", s)
+        s = s.strip("'\"")  # ← убираем апострофы и кавычки (Google Sheets текстовый маркер)
         words = s.split()
         return " ".join(words).lower()
 
@@ -507,17 +508,11 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
         logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк")
-        # Лог всех уникальных названий счетов в реестре
-        unique_accounts = set()
-        for row in реестр_data[1:]:
-            if len(row) >= 7 and row[6].strip():
-                unique_accounts.add(repr(row[6].strip()))
-        арман_variants = [a for a in unique_accounts if "арман" in a.lower() or "голд" in a.lower() or "gold" in a.lower()]
-        logger.info(f"check_balance: варианты 'Арман': {арман_variants}")
+
         total_operations = 0.0
         ops_count = 0
-
         short_rows = 0
+
         for row in реестр_data[1:]:
             if len(row) < 7:
                 short_rows += 1
@@ -528,6 +523,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     ops_count += 1
                 except:
                     pass
+
         logger.info(f"check_balance: пропущено коротких строк (len<7): {short_rows}")
 
         # 3. Добавляем новые строки которые могли не успеть попасть в Sheets
@@ -564,7 +560,6 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
     msg = ""
     if closing_balance is not None:
-        # Передаём current_rows как extra_rows — на случай если Sheets ещё не обновился
         result = check_balance(account, closing_balance, extra_rows=current_rows)
         dds_balance, bank_balance, initial_balance, ops_count, total_operations, source = result
 
@@ -697,15 +692,15 @@ def process_kaspi_gold_pdf(file_bytes):
             account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
 
         if is_deposit:
-            matches = re.findall(
+            dep_matches = re.findall(
                 r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
                 all_text
             )
-            if len(matches) >= 2:
-                opening_balance = parse_num(matches[0])
-                closing_balance = parse_num(matches[-1])
-            elif len(matches) == 1:
-                closing_balance = parse_num(matches[0])
+            if len(dep_matches) >= 2:
+                opening_balance = parse_num(dep_matches[0])
+                closing_balance = parse_num(dep_matches[-1])
+            elif len(dep_matches) == 1:
+                closing_balance = parse_num(dep_matches[0])
 
             lines = all_text.split("\n")
             for line in lines:
@@ -724,15 +719,15 @@ def process_kaspi_gold_pdf(file_bytes):
                     desc = m.group(3).strip()
                     rows.append(make_row(date_str, amount, account, desc))
         else:
-            matches = re.findall(
+            bal_matches = re.findall(
                 r"Доступно на\s+\d{2}\.\d{2}[\.\d\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
                 all_text
             )
-            if len(matches) >= 2:
-                opening_balance = parse_num(matches[0])
-                closing_balance = parse_num(matches[1])
-            elif len(matches) == 1:
-                closing_balance = parse_num(matches[0])
+            if len(bal_matches) >= 2:
+                opening_balance = parse_num(bal_matches[0])
+                closing_balance = parse_num(bal_matches[1])
+            elif len(bal_matches) == 1:
+                closing_balance = parse_num(bal_matches[0])
 
             for page in pdf.pages:
                 tables = page.extract_tables()
