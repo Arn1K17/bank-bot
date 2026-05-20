@@ -21,7 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 WEBHOOK_URL = "https://bank-bot-w89l.onrender.com"
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -55,7 +55,6 @@ def get_sheet():
     return get_spreadsheet().worksheet(SHEET_NAME)
 
 def format_date(val):
-    """Всегда возвращает MM/DD/YYYY (месяц/день/год)."""
     if isinstance(val, datetime):
         return val.strftime("%m/%d/%Y")
     s = str(val).replace("\n", "").strip()
@@ -236,7 +235,6 @@ def _normalize_amount_exact(amount) -> str:
 def make_exact_key(date, amount, account):
     return (str(date).strip(), str(account).strip(), _normalize_amount_exact(amount))
 
-
 def make_dedup_key(date, amount, account, desc):
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
     doc_num = _extract_doc_num(desc_clean)
@@ -259,7 +257,7 @@ def is_duplicate(r, existing_keys):
         return True
     return False
 
-# ============ OPENROUTER AI ============
+# ============ GROQ AI ============
 def get_sheets_data_for_ai():
     try:
         spreadsheet = get_spreadsheet()
@@ -350,7 +348,6 @@ def ask_ai(question: str) -> str:
 - Отвечай ТОЛЬКО на русском языке
 - Отвечай КОРОТКО — только финальный ответ, без рассуждений
 - НЕ показывай свои вычисления, мысли, списки промежуточных шагов
-- НЕ пиши "We need to answer", "Let's compute", "Thus", "Let me" и подобное
 - НЕ повторяй данные реестра целиком
 - Если спрашивают остаток на счетах — дай цифры по каждому счёту и итог
 - Если данных недостаточно — скажи об этом коротко
@@ -358,35 +355,27 @@ def ask_ai(question: str) -> str:
 Вопрос пользователя: {question}
 
 Дай ТОЛЬКО финальный ответ на русском языке. Никаких рассуждений."""
+
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/Arn1K17/bank-bot",
-            "X-Title": "Bank Bot"
         }
         payload = {
-            "model": "nvidia/nemotron-3-super-120b-a12b:free",
+            "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1000,
             "temperature": 0.3
         }
         resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers, json=payload, timeout=30, verify=True
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers, json=payload, timeout=30
         )
         resp.raise_for_status()
         result = resp.json()
         text = result["choices"][0]["message"].get("content") or "Нет ответа"
-        text = re.sub(r'^(answer|Answer)\s*', '', text).strip()
-        lines = text.split("\n")
-        eng_lines = [l for l in lines if l.strip() and re.search(r'[a-zA-Z]{3,}', l) and not re.search(r'[а-яА-Я]{3,}', l)]
-        if len(eng_lines) > len(lines) / 3:
-            rus_lines = [l for l in lines if re.search(r'[а-яА-Я]{3,}', l)]
-            if rus_lines:
-                text = "\n".join(rus_lines)
         return text.strip()
     except Exception as e:
-        logger.error(f"OpenRouter error: {e}")
+        logger.error(f"Groq error: {e}")
         return f"❌ Ошибка ИИ: {str(e)}"
 
 # ============ СВЕРКА ОСТАТКОВ ============
@@ -488,30 +477,22 @@ def _matches_account(row_acc, target):
     return False
 
 def check_balance(account_name, bank_closing_balance, extra_rows=None):
-    """
-    DDS = начальный остаток из Счета2026(Справка) + все строки реестра по счёту.
-    extra_rows — строки из текущего файла на случай задержки Sheets.
-    """
     try:
         bank_balance = round(bank_closing_balance, 2)
         spreadsheet = get_spreadsheet()
 
-        # 1. Начальный остаток из Справки
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
         matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
         if initial_balance is None:
             return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
 
-        # 2. Все операции из реестра
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
-        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк")
 
         total_operations = 0.0
         ops_count = 0
         short_rows = 0
-        no_match_samples = []
 
         for row in реестр_data[1:]:
             if len(row) < 7:
@@ -523,21 +504,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                     ops_count += 1
                 except Exception as parse_err:
                     logger.warning(f"check_balance: не парсится сумма row[4]={repr(row[4])} err={parse_err}")
-            else:
-                if len(no_match_samples) < 10:
-                    no_match_samples.append({
-                        "g": repr(row[6]),
-                        "e": repr(row[4]),
-                        "d": repr(row[3]),
-                    })
 
-        logger.info(f"check_balance: пропущено коротких строк (len<7): {short_rows}")
-        if no_match_samples:
-            logger.info(f"check_balance: НЕ совпали первые примеры: {no_match_samples}")
-        else:
-            logger.info(f"check_balance: все строки прошли matches (нет несовпадений)")
-
-        # 3. Добавляем новые строки которые могли не успеть попасть в Sheets
         if extra_rows:
             реестр_keys = set()
             for row in реестр_data[1:]:
@@ -556,11 +523,6 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         dds_balance = round(initial_balance + total_operations, 2)
         source = "Счета2026(Справка)"
 
-        logger.info(
-            f"Сверка '{account_name}': нач={initial_balance}, "
-            f"операций={ops_count}, сумма={total_operations}, "
-            f"ДДС={dds_balance}, банк={bank_balance}"
-        )
         return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
 
     except Exception as e:
@@ -569,7 +531,6 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
 
 def get_account_rows(account_name):
-    """Возвращает список (sheet_row_number, row_data) всех строк реестра по счёту."""
     spreadsheet = get_spreadsheet()
     реестр = spreadsheet.worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -993,7 +954,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # ── /rows <account> ── вывод всех строк реестра по счёту ──────────────
         if question.startswith("/rows"):
             acc = question[5:].strip()
             if not acc:
@@ -1014,7 +974,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ Строк по счёту «{acc}» не найдено.")
                 return
 
-            # Считаем итог
             total = 0.0
             for _, row in matched:
                 try:
@@ -1029,7 +988,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{'─'*35}\n"
             )
 
-            # Формируем строки — разбиваем на части по 50 строк чтобы не превысить лимит Telegram
             chunk_size = 50
             chunks = [matched[i:i+chunk_size] for i in range(0, len(matched), chunk_size)]
 
@@ -1038,9 +996,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for sheet_row, row in chunk:
                     date = row[3] if len(row) > 3 else ""
                     amount = row[4] if len(row) > 4 else ""
-                    acc_name = row[6] if len(row) > 6 else ""
                     desc = row[8] if len(row) > 8 else ""
-                    # Обрезаем описание до 40 символов
                     desc_short = (desc[:40] + "…") if len(desc) > 40 else desc
                     lines.append(f"#{sheet_row} | {date} | {amount} | {desc_short}")
 
@@ -1053,7 +1009,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg)
 
             return
-        # ──────────────────────────────────────────────────────────────────────
 
         await update.message.reply_text("🤔 Думаю...")
         answer = ask_ai(question)
@@ -1101,7 +1056,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time.sleep(2)
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
-        logger.info(f"Всего строк в таблице: {len(existing_data)}")
 
         existing_key_to_row = {}
         for i, row in enumerate(existing_data[1:], start=2):
@@ -1116,9 +1070,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if exact_key not in existing_key_to_row:
                     existing_key_to_row[exact_key] = i
         existing_keys = set(existing_key_to_row.keys())
-
-        first_new_key = make_dedup_key(rows[0][3], rows[0][4], rows[0][6], rows[0][8])
-        logger.info(f"Первый новый ключ: {first_new_key}, в таблице: {first_new_key in existing_keys}")
 
         dupe_sheet_rows = []
         dupe_rows = []
