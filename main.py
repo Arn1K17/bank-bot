@@ -652,7 +652,7 @@ def process_xlsx(file_bytes):
 
     return rows, account, closing_balance, opening_balance
 
-# ============ PDF Kaspi ============
+# ============ PDF Kaspi Gold / Справка ============
 def process_kaspi_gold_pdf(file_bytes):
     rows = []
     account = "Арман каспи голд"
@@ -667,6 +667,7 @@ def process_kaspi_gold_pdf(file_bytes):
 
         is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
 
+        # Определяем счёт
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
         if m_iban:
             iban = m_iban.group(1).strip()
@@ -676,7 +677,56 @@ def process_kaspi_gold_pdf(file_bytes):
         elif "KZ19722RU00001041014" in first_text:
             account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
 
-        if is_deposit:
+        # Kaspi Gold Справка формат: "Доступно на DD.MM.YY: + XXX ₸"
+        if not is_deposit:
+            # Ищем остатки в формате Справки
+            bal_matches = re.findall(
+                r"Доступно на\s+(\d{2}\.\d{2}\.\d{2,4})[:\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
+                all_text
+            )
+            if len(bal_matches) >= 2:
+                opening_balance = parse_num(bal_matches[0][1])
+                closing_balance = parse_num(bal_matches[-1][1])
+            elif len(bal_matches) == 1:
+                closing_balance = parse_num(bal_matches[0][1])
+
+            # Парсим транзакции из таблицы
+            # Формат Справки: таблица с колонками Дата | Сумма | Операция | Детали
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if not row or len(row) < 3:
+                            continue
+                        date_cell = str(row[0] or "").strip()
+                        amount_cell = str(row[1] or "").strip()
+                        # Колонка "Операция" и "Детали" объединяем
+                        op_cell = str(row[2] or "").strip() if len(row) > 2 else ""
+                        det_cell = str(row[3] or "").strip() if len(row) > 3 else ""
+                        desc_cell = f"{op_cell} {det_cell}".strip()
+
+                        # Дата формата DD.MM.YY или DD.MM.YYYY
+                        if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
+                            continue
+
+                        # Парсим сумму: "+ 14 000,00 ₸" или "- 5 400,00 ₸"
+                        amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
+                        sign = 1
+                        if amount_clean.startswith("-"):
+                            sign = -1
+                            amount_clean = amount_clean[1:]
+                        elif amount_clean.startswith("+"):
+                            amount_clean = amount_clean[1:]
+                        try:
+                            amount = sign * float(amount_clean)
+                        except:
+                            continue
+
+                        date_str = format_date(date_cell)
+                        rows.append(make_row(date_str, amount, account, desc_cell))
+
+        else:
+            # Депозит
             dep_matches = re.findall(
                 r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
                 all_text
@@ -703,43 +753,6 @@ def process_kaspi_gold_pdf(file_bytes):
                         continue
                     desc = m.group(3).strip()
                     rows.append(make_row(date_str, amount, account, desc))
-        else:
-            bal_matches = re.findall(
-                r"Доступно на\s+\d{2}\.\d{2}[\.\d\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
-                all_text
-            )
-            if len(bal_matches) >= 2:
-                opening_balance = parse_num(bal_matches[0])
-                closing_balance = parse_num(bal_matches[1])
-            elif len(bal_matches) == 1:
-                closing_balance = parse_num(bal_matches[0])
-
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    for row in table:
-                        if not row or len(row) < 3:
-                            continue
-                        date_cell = str(row[0] or "").strip()
-                        amount_cell = str(row[1] or "").strip()
-                        desc_cell = str(row[2] or "").strip() if len(row) > 2 else ""
-                        if len(row) > 3 and row[3]:
-                            desc_cell = desc_cell + " " + str(row[3]).strip()
-                        if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
-                            continue
-                        amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
-                        sign = 1
-                        if amount_clean.startswith("-"):
-                            sign = -1
-                            amount_clean = amount_clean[1:]
-                        elif amount_clean.startswith("+"):
-                            amount_clean = amount_clean[1:]
-                        try:
-                            amount = sign * float(amount_clean)
-                        except:
-                            continue
-                        date_str = format_date(date_cell)
-                        rows.append(make_row(date_str, amount, account, desc_cell))
 
     if opening_balance is None and closing_balance is not None and rows:
         total_ops = sum(float(r[4]) for r in rows)
@@ -760,19 +773,22 @@ def process_bcc_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
+        # Определяем счёт
         m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
+        if not m:
+            m = re.search(r"ЖСК\s*/\s*ИИК\s+(KZ\w+)", full_text)
         if m:
             iban = m.group(1).strip()
             account = IBAN_MAP.get(iban, iban)
 
-        m_open = re.search(r"[Кк]іріс қалдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        # Входящий остаток
+        m_open = re.search(r"[Кк]іріс [қк]алдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_open:
             m_open = re.search(r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
-        if not m_open:
-            m_open = re.search(r"[Вв]ходящ[а-я]+\s+[а-я]+[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if m_open:
             opening_balance = parse_num(m_open.group(1))
 
+        # Исходящий остаток
         m_bal = re.search(r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
             m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
@@ -781,6 +797,7 @@ def process_bcc_pdf(file_bytes):
         if m_bal:
             closing_balance = parse_num(m_bal.group(1))
 
+        # Собираем все строки таблицы со всех страниц
         all_table_rows = []
         for page in pdf.pages:
             tables = page.extract_tables()
@@ -789,61 +806,88 @@ def process_bcc_pdf(file_bytes):
                     if row and len(row) >= 12:
                         all_table_rows.append(list(row))
 
+        # Склейка строк разбитых между страницами
         merged_rows = []
         i = 0
         while i < len(all_table_rows):
             row = all_table_rows[i]
             c0 = str(row[0] or "").replace("\n", "").strip()
             c1 = str(row[1] or "").replace("\n", "").strip()
+
+            # Пропускаем заголовки и итоги
             if "итого" in c0.lower() or "жиынтығы" in c0.lower():
                 i += 1
                 continue
-            if "дата" in c1.lower() or "күні" in c1.lower():
+            if "дата" in c1.lower() or "күні" in c1.lower() or "реттік" in c0.lower():
                 i += 1
                 continue
-            is_broken = c0 == "NT-" or (c0.startswith("NT") and not re.search(r"\d{3,}", c0))
-            if is_broken and i + 1 < len(all_table_rows):
-                next_row = all_table_rows[i + 1]
-                glued = []
-                for ci in range(12):
-                    pv = str(row[ci] or "").strip()
-                    nv = str(next_row[ci] or "").strip()
-                    glued.append((pv + nv).strip())
-                merged_rows.append(glued)
-                i += 2
-            else:
-                merged_rows.append(row)
-                i += 1
 
+            # Случай: c0 == 'NT-' — строка обрезана между страницами
+            # Следующая строка содержит только цифровое продолжение номера
+            if c0 == "NT-" and i + 1 < len(all_table_rows):
+                next_row = all_table_rows[i + 1]
+                nc0 = str(next_row[0] or "").replace("\n", "").strip()
+                if re.match(r"^\d+$", nc0):
+                    glued = []
+                    for ci in range(12):
+                        pv = str(row[ci] or "").replace("\n", " ").strip()
+                        nv = str(next_row[ci] or "").replace("\n", " ").strip()
+                        if ci == 0:
+                            # NT- + цифры = полный номер
+                            glued.append("NT-" + nc0)
+                        elif ci == 1:
+                            # Дата: берём строку где есть полная дата
+                            if re.search(r"\d{1,2}\.\d{2}\.\d{4}", pv):
+                                glued.append(pv)
+                            elif re.search(r"\d{1,2}\.\d{2}\.\d{4}", nv):
+                                glued.append(nv)
+                            else:
+                                # Склеиваем части даты: "14.05.202" + "6 18:10" → нужно будет regex вытащит дату
+                                glued.append((pv + nv).strip())
+                        elif ci in (7, 8):
+                            # Сумма: склеиваем части числа: "1 970" + "000,00" → "1970000,00"
+                            combined = (pv + nv).replace(" ", "")
+                            glued.append(combined)
+                        else:
+                            glued.append((pv + " " + nv).strip() if (pv and nv) else (pv or nv))
+                    merged_rows.append(glued)
+                    i += 2
+                    continue
+
+            merged_rows.append(row)
+            i += 1
+
+        # Парсим итоговые строки
         for row in merged_rows:
-            if len(row) < 12:
+            c0 = str(row[0] or "").replace("\n", "").strip()
+            c1 = str(row[1] or "").replace("\n", "").strip()
+            c7 = str(row[7] or "").replace("\n", " ").strip()
+            c8 = str(row[8] or "").replace("\n", " ").strip()
+            c11 = str(row[11] or "").replace("\n", " ").strip()
+
+            if "итого" in c1.lower() or "жиынтығы" in c1.lower():
                 continue
-            doc_num_cell = str(row[0] or "").replace("\n", "").strip()
-            date_cell = str(row[1] or "").replace("\n", "").strip()
-            debit_cell = str(row[7] or "").replace("\n", "").strip()
-            credit_cell = str(row[8] or "").replace("\n", "").strip()
-            desc_raw = str(row[11] or "").replace("\n", " ").strip()
-            if "итого" in date_cell.lower() or "жиынтығы" in date_cell.lower():
-                continue
-            date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", date_cell)
+
+            # Ищем дату (устойчиво к частичным данным после склейки)
+            date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", c1)
             if not date_m:
                 continue
             day = int(date_m.group(1))
             month = int(date_m.group(2))
             year = date_m.group(3)
             date_str = f"{month:02d}/{day:02d}/{year}"
-            debit = parse_num(debit_cell)
-            credit = parse_num(credit_cell)
+
+            debit = parse_num(c7)
+            credit = parse_num(c8)
+
             if debit > 0:
                 amount = -debit
             elif credit > 0:
                 amount = credit
             else:
                 continue
-            if doc_num_cell:
-                desc = f"{doc_num_cell} {desc_raw}".strip()
-            else:
-                desc = desc_raw
+
+            desc = f"{c0} {c11}".strip() if c0 else c11
             rows.append(make_row(date_str, amount, account, desc))
 
     logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
@@ -922,6 +966,8 @@ def process_halyk_pdf(file_bytes):
 def detect_pdf_type(first_page_text):
     if "По Депозиту" in first_page_text or "На Депозите" in first_page_text or "KZ19722RU" in first_page_text:
         return "kaspi_deposit"
+    if "СПРАВКА" in first_page_text and ("Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text or "CASPKZKA" in first_page_text):
+        return "kaspi_gold"
     if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
         return "kaspi_gold"
     if "Kaspi Bank" in first_page_text or "CASPKZKA" in first_page_text:
