@@ -192,6 +192,25 @@ def make_row(date_str, amount, account, desc, supplier=""):
     ]
 
 # ============ ДЕДУПЛИКАЦИЯ ============
+
+def _normalize_date(date_str: str) -> str:
+    """Приводим дату к единому формату MM/DD/YYYY с ведущими нулями."""
+    s = str(date_str).strip()
+    # Пробуем через strptime
+    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%m/%d/%Y")
+        except:
+            pass
+    # Вручную нормализуем части
+    parts = s.split("/")
+    if len(parts) == 3:
+        try:
+            return f"{int(parts[0]):02d}/{int(parts[1]):02d}/{parts[2]}"
+        except:
+            pass
+    return s
+
 def _extract_doc_num(desc_clean: str) -> str:
     desc_lower = desc_clean.lower()
     m = re.match(r'^(g2-\d+)', desc_lower)
@@ -233,17 +252,17 @@ def _normalize_amount_exact(amount) -> str:
         return amt_str
 
 def make_exact_key(date, amount, account):
-    return (str(date).strip(), str(account).strip(), _normalize_amount_exact(amount))
+    return (_normalize_date(str(date).strip()), str(account).strip(), _normalize_amount_exact(amount))
 
 def make_dedup_key(date, amount, account, desc):
     desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
     doc_num = _extract_doc_num(desc_clean)
     if doc_num:
-        return (str(date).strip(), str(account).strip(), doc_num)
-    return (str(date).strip(), str(account).strip(), _normalize_amount(amount))
+        return (_normalize_date(str(date).strip()), str(account).strip(), doc_num)
+    return (_normalize_date(str(date).strip()), str(account).strip(), _normalize_amount(amount))
 
 def make_fallback_key(date, amount, account):
-    return (str(date).strip(), str(account).strip(), _normalize_amount(amount))
+    return (_normalize_date(str(date).strip()), str(account).strip(), _normalize_amount(amount))
 
 def is_duplicate(r, existing_keys):
     key = make_dedup_key(r[3], r[4], r[6], r[8])
@@ -667,7 +686,6 @@ def process_kaspi_gold_pdf(file_bytes):
 
         is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
 
-        # Определяем счёт
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
         if m_iban:
             iban = m_iban.group(1).strip()
@@ -677,9 +695,7 @@ def process_kaspi_gold_pdf(file_bytes):
         elif "KZ19722RU00001041014" in first_text:
             account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
 
-        # Kaspi Gold Справка формат: "Доступно на DD.MM.YY: + XXX ₸"
         if not is_deposit:
-            # Ищем остатки в формате Справки
             bal_matches = re.findall(
                 r"Доступно на\s+(\d{2}\.\d{2}\.\d{2,4})[:\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
                 all_text
@@ -690,8 +706,6 @@ def process_kaspi_gold_pdf(file_bytes):
             elif len(bal_matches) == 1:
                 closing_balance = parse_num(bal_matches[0][1])
 
-            # Парсим транзакции из таблицы
-            # Формат Справки: таблица с колонками Дата | Сумма | Операция | Детали
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
@@ -700,16 +714,13 @@ def process_kaspi_gold_pdf(file_bytes):
                             continue
                         date_cell = str(row[0] or "").strip()
                         amount_cell = str(row[1] or "").strip()
-                        # Колонка "Операция" и "Детали" объединяем
                         op_cell = str(row[2] or "").strip() if len(row) > 2 else ""
                         det_cell = str(row[3] or "").strip() if len(row) > 3 else ""
                         desc_cell = f"{op_cell} {det_cell}".strip()
 
-                        # Дата формата DD.MM.YY или DD.MM.YYYY
                         if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
                             continue
 
-                        # Парсим сумму: "+ 14 000,00 ₸" или "- 5 400,00 ₸"
                         amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
                         sign = 1
                         if amount_clean.startswith("-"):
@@ -726,7 +737,6 @@ def process_kaspi_gold_pdf(file_bytes):
                         rows.append(make_row(date_str, amount, account, desc_cell))
 
         else:
-            # Депозит
             dep_matches = re.findall(
                 r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
                 all_text
@@ -773,7 +783,6 @@ def process_bcc_pdf(file_bytes):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
-        # Определяем счёт
         m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
         if not m:
             m = re.search(r"ЖСК\s*/\s*ИИК\s+(KZ\w+)", full_text)
@@ -781,14 +790,12 @@ def process_bcc_pdf(file_bytes):
             iban = m.group(1).strip()
             account = IBAN_MAP.get(iban, iban)
 
-        # Входящий остаток
         m_open = re.search(r"[Кк]іріс [қк]алдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_open:
             m_open = re.search(r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if m_open:
             opening_balance = parse_num(m_open.group(1))
 
-        # Исходящий остаток
         m_bal = re.search(r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
             m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
@@ -797,7 +804,6 @@ def process_bcc_pdf(file_bytes):
         if m_bal:
             closing_balance = parse_num(m_bal.group(1))
 
-        # Собираем все строки таблицы со всех страниц
         all_table_rows = []
         for page in pdf.pages:
             tables = page.extract_tables()
@@ -806,7 +812,6 @@ def process_bcc_pdf(file_bytes):
                     if row and len(row) >= 12:
                         all_table_rows.append(list(row))
 
-        # Склейка строк разбитых между страницами
         merged_rows = []
         i = 0
         while i < len(all_table_rows):
@@ -814,7 +819,6 @@ def process_bcc_pdf(file_bytes):
             c0 = str(row[0] or "").replace("\n", "").strip()
             c1 = str(row[1] or "").replace("\n", "").strip()
 
-            # Пропускаем заголовки и итоги
             if "итого" in c0.lower() or "жиынтығы" in c0.lower():
                 i += 1
                 continue
@@ -822,8 +826,6 @@ def process_bcc_pdf(file_bytes):
                 i += 1
                 continue
 
-            # Случай: c0 == 'NT-' — строка обрезана между страницами
-            # Следующая строка содержит только цифровое продолжение номера
             if c0 == "NT-" and i + 1 < len(all_table_rows):
                 next_row = all_table_rows[i + 1]
                 nc0 = str(next_row[0] or "").replace("\n", "").strip()
@@ -833,19 +835,15 @@ def process_bcc_pdf(file_bytes):
                         pv = str(row[ci] or "").replace("\n", " ").strip()
                         nv = str(next_row[ci] or "").replace("\n", " ").strip()
                         if ci == 0:
-                            # NT- + цифры = полный номер
                             glued.append("NT-" + nc0)
                         elif ci == 1:
-                            # Дата: берём строку где есть полная дата
                             if re.search(r"\d{1,2}\.\d{2}\.\d{4}", pv):
                                 glued.append(pv)
                             elif re.search(r"\d{1,2}\.\d{2}\.\d{4}", nv):
                                 glued.append(nv)
                             else:
-                                # Склеиваем части даты: "14.05.202" + "6 18:10" → нужно будет regex вытащит дату
                                 glued.append((pv + nv).strip())
                         elif ci in (7, 8):
-                            # Сумма: склеиваем части числа: "1 970" + "000,00" → "1970000,00"
                             combined = (pv + nv).replace(" ", "")
                             glued.append(combined)
                         else:
@@ -857,7 +855,6 @@ def process_bcc_pdf(file_bytes):
             merged_rows.append(row)
             i += 1
 
-        # Парсим итоговые строки
         for row in merged_rows:
             c0 = str(row[0] or "").replace("\n", "").strip()
             c1 = str(row[1] or "").replace("\n", "").strip()
@@ -868,7 +865,6 @@ def process_bcc_pdf(file_bytes):
             if "итого" in c1.lower() or "жиынтығы" in c1.lower():
                 continue
 
-            # Ищем дату (устойчиво к частичным данным после склейки)
             date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", c1)
             if not date_m:
                 continue
@@ -1107,6 +1103,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, row in enumerate(existing_data[1:], start=2):
             if len(row) >= 9:
                 raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
+                # Нормализуем дату при чтении из таблицы — ключ фикс
                 key = make_dedup_key(row[3], raw_amount, row[6], row[8])
                 existing_key_to_row[key] = i
                 fb_key = make_fallback_key(row[3], raw_amount, row[6])
