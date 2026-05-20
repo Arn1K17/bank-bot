@@ -194,15 +194,14 @@ def make_row(date_str, amount, account, desc, supplier=""):
 # ============ ДЕДУПЛИКАЦИЯ ============
 
 def _normalize_date(date_str: str) -> str:
-    """Приводим дату к единому формату MM/DD/YYYY с ведущими нулями."""
+    """Приводим дату к единому формату MM/DD/YYYY с ведущими нулями.
+    Фикс: '5/13/2026' и '05/13/2026' теперь одинаковые ключи."""
     s = str(date_str).strip()
-    # Пробуем через strptime
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(s, fmt).strftime("%m/%d/%Y")
         except:
             pass
-    # Вручную нормализуем части
     parts = s.split("/")
     if len(parts) == 3:
         try:
@@ -210,6 +209,31 @@ def _normalize_date(date_str: str) -> str:
         except:
             pass
     return s
+
+def _strip_doc_num(desc: str) -> str:
+    """Убираем ведущий номер документа (7-12 цифр) из описания.
+    Фикс: '45779867 Оплата...' → 'Оплата...' чтобы найти дубль старой строки 'Оплата...'"""
+    return re.sub(r'^\d{7,12}\s+', '', str(desc).strip())
+
+def _normalize_desc(desc: str) -> str:
+    """Нормализуем описание: убираем номер, лишние пробелы, lowercase."""
+    d = _strip_doc_num(desc)
+    d = re.sub(r'\s+', ' ', d.replace("\n", " ").replace("\r", " ")).strip().lower()
+    return d
+
+def _normalize_amount(amount) -> str:
+    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "").replace(",", "")
+    try:
+        return str(int(round(float(amt_str))))
+    except:
+        return amt_str
+
+def _normalize_amount_exact(amount) -> str:
+    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "").replace(",", "")
+    try:
+        return f"{float(amt_str):.2f}"
+    except:
+        return amt_str
 
 def _extract_doc_num(desc_clean: str) -> str:
     desc_lower = desc_clean.lower()
@@ -233,48 +257,75 @@ def _extract_doc_num(desc_clean: str) -> str:
         return m.group(1)
     return ""
 
-def _normalize_amount(amount) -> str:
-    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "")
-    amt_str = amt_str.replace(",", "")
-    try:
-        f = float(amt_str)
-        return str(int(round(f)))
-    except:
-        return amt_str
+def _build_all_keys(date, amount, account, desc):
+    """
+    Возвращает список всех ключей для одной строки.
+    Чем больше ключей — тем надёжнее дедупликация.
+    """
+    nd = _normalize_date(str(date).strip())
+    acc = str(account).strip()
+    amt = _normalize_amount(amount)
+    amt_exact = _normalize_amount_exact(amount)
 
-def _normalize_amount_exact(amount) -> str:
-    amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "")
-    amt_str = amt_str.replace(",", "")
-    try:
-        f = float(amt_str)
-        return f"{f:.2f}"
-    except:
-        return amt_str
+    desc_raw = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
+    desc_no_num = _strip_doc_num(desc_raw)           # без ведущего номера
+    desc_norm = _normalize_desc(desc_raw)            # без номера + lowercase
+    desc_short = desc_norm[:50]                      # первые 50 символов текста
 
-def make_exact_key(date, amount, account):
-    return (_normalize_date(str(date).strip()), str(account).strip(), _normalize_amount_exact(amount))
+    doc_num = _extract_doc_num(desc_raw)
 
-def make_dedup_key(date, amount, account, desc):
-    desc_clean = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
-    doc_num = _extract_doc_num(desc_clean)
+    keys = []
+
+    # Ключ 1: дата + счёт + номер документа (если есть)
     if doc_num:
-        return (_normalize_date(str(date).strip()), str(account).strip(), doc_num)
-    return (_normalize_date(str(date).strip()), str(account).strip(), _normalize_amount(amount))
+        keys.append(("doc", nd, acc, doc_num))
 
-def make_fallback_key(date, amount, account):
-    return (_normalize_date(str(date).strip()), str(account).strip(), _normalize_amount(amount))
+    # Ключ 2: дата + счёт + точная сумма (2 знака)
+    keys.append(("exact", nd, acc, amt_exact))
 
-def is_duplicate(r, existing_keys):
-    key = make_dedup_key(r[3], r[4], r[6], r[8])
-    if key in existing_keys:
-        return True
-    fb_key = make_fallback_key(r[3], r[4], r[6])
-    if fb_key in existing_keys:
-        return True
-    exact_key = make_exact_key(r[3], r[4], r[6])
-    if exact_key in existing_keys:
-        return True
+    # Ключ 3: дата + счёт + округлённая сумма
+    keys.append(("amt", nd, acc, amt))
+
+    # Ключ 4: дата + счёт + текст без номера (первые 50 символов)
+    # ГЛАВНЫЙ ФИКСдля случая когда старая запись без номера, новая с номером
+    if desc_short:
+        keys.append(("text", nd, acc, desc_short))
+
+    # Ключ 5: дата + счёт + сумма + текст без номера (самый точный)
+    if desc_short:
+        keys.append(("amt+text", nd, acc, amt, desc_short))
+
+    return keys
+
+def is_duplicate(r, existing_keys: set) -> bool:
+    keys = _build_all_keys(r[3], r[4], r[6], r[8])
+    for k in keys:
+        if k in existing_keys:
+            return True
     return False
+
+def build_existing_keys(existing_data) -> tuple:
+    """
+    Строим словарь ключ→номер_строки и множество ключей из существующих данных таблицы.
+    """
+    key_to_row = {}
+    for i, row in enumerate(existing_data[1:], start=2):
+        if len(row) < 9:
+            continue
+        raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
+        keys = _build_all_keys(row[3], raw_amount, row[6], row[8])
+        for k in keys:
+            if k not in key_to_row:
+                key_to_row[k] = i
+    return key_to_row, set(key_to_row.keys())
+
+def find_existing_row(r, key_to_row: dict):
+    """Ищем номер строки в таблице для дубликата."""
+    keys = _build_all_keys(r[3], r[4], r[6], r[8])
+    for k in keys:
+        if k in key_to_row:
+            return key_to_row[k]
+    return None
 
 # ============ GROQ AI ============
 def get_sheets_data_for_ai():
@@ -511,11 +562,9 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         total_operations = 0.0
         ops_count = 0
-        short_rows = 0
 
         for row in реестр_data[1:]:
             if len(row) < 7:
-                short_rows += 1
                 continue
             if _matches_account(row[6], account_name):
                 try:
@@ -1099,30 +1148,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
 
-        existing_key_to_row = {}
-        for i, row in enumerate(existing_data[1:], start=2):
-            if len(row) >= 9:
-                raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
-                # Нормализуем дату при чтении из таблицы — ключ фикс
-                key = make_dedup_key(row[3], raw_amount, row[6], row[8])
-                existing_key_to_row[key] = i
-                fb_key = make_fallback_key(row[3], raw_amount, row[6])
-                if fb_key not in existing_key_to_row:
-                    existing_key_to_row[fb_key] = i
-                exact_key = make_exact_key(row[3], raw_amount, row[6])
-                if exact_key not in existing_key_to_row:
-                    existing_key_to_row[exact_key] = i
-        existing_keys = set(existing_key_to_row.keys())
+        # Строим все ключи из существующих данных таблицы
+        key_to_row, existing_keys = build_existing_keys(existing_data)
 
         dupe_sheet_rows = []
         dupe_rows = []
         for r in rows:
             if is_duplicate(r, existing_keys):
                 dupe_rows.append(r)
-                key = make_dedup_key(r[3], r[4], r[6], r[8])
-                fb_key = make_fallback_key(r[3], r[4], r[6])
-                exact_key = make_exact_key(r[3], r[4], r[6])
-                sheet_row = existing_key_to_row.get(key) or existing_key_to_row.get(fb_key) or existing_key_to_row.get(exact_key)
+                sheet_row = find_existing_row(r, key_to_row)
                 dupe_sheet_rows.append(sheet_row)
         dupes = len(dupe_rows)
 
