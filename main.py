@@ -535,14 +535,15 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         total_operations = 0.0
         ops_count = 0
+        target_clean = _clean_name_for_match(account_name)
 
-        # ИСПРАВЛЕНИЕ: не используем len(row) < 7, читаем индексы безопасно
+        # Только точное совпадение названия счёта (после нормализации)
         for row in реестр_data[1:]:
             acc_val = row[6].strip() if len(row) > 6 else ""
             amt_val = row[4].strip() if len(row) > 4 else ""
             if not acc_val or not amt_val:
                 continue
-            if _matches_account(acc_val, account_name):
+            if _clean_name_for_match(acc_val) == target_clean:
                 try:
                     total_operations += float(amt_val.replace(" ", "").replace(",", "."))
                     ops_count += 1
@@ -559,7 +560,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 реестр_keys.add((d, a, v))
             for r in extra_rows:
                 r_key = (r[3].strip(), r[6].strip().lower(), str(r[4]).strip())
-                if r_key not in реестр_keys and _matches_account(r[6], account_name):
+                if r_key not in реестр_keys and _clean_name_for_match(r[6]) == target_clean:
                     try:
                         total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
                         ops_count += 1
