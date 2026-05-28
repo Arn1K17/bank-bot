@@ -194,8 +194,6 @@ def make_row(date_str, amount, account, desc, supplier=""):
 # ============ ДЕДУПЛИКАЦИЯ ============
 
 def _normalize_date(date_str: str) -> str:
-    """Приводим дату к единому формату MM/DD/YYYY с ведущими нулями.
-    Фикс: '5/13/2026' и '05/13/2026' теперь одинаковые ключи."""
     s = str(date_str).strip()
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
         try:
@@ -211,12 +209,9 @@ def _normalize_date(date_str: str) -> str:
     return s
 
 def _strip_doc_num(desc: str) -> str:
-    """Убираем ведущий номер документа (7-12 цифр) из описания.
-    Фикс: '45779867 Оплата...' → 'Оплата...' чтобы найти дубль старой строки 'Оплата...'"""
     return re.sub(r'^\d{7,12}\s+', '', str(desc).strip())
 
 def _normalize_desc(desc: str) -> str:
-    """Нормализуем описание: убираем номер, лишние пробелы, lowercase."""
     d = _strip_doc_num(desc)
     d = re.sub(r'\s+', ' ', d.replace("\n", " ").replace("\r", " ")).strip().lower()
     return d
@@ -258,43 +253,25 @@ def _extract_doc_num(desc_clean: str) -> str:
     return ""
 
 def _build_all_keys(date, amount, account, desc):
-    """
-    Возвращает список всех ключей для одной строки.
-    Чем больше ключей — тем надёжнее дедупликация.
-    """
     nd = _normalize_date(str(date).strip())
     acc = str(account).strip()
     amt = _normalize_amount(amount)
     amt_exact = _normalize_amount_exact(amount)
 
     desc_raw = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
-    desc_no_num = _strip_doc_num(desc_raw)           # без ведущего номера
-    desc_norm = _normalize_desc(desc_raw)            # без номера + lowercase
-    desc_short = desc_norm[:50]                      # первые 50 символов текста
-
+    desc_norm = _normalize_desc(desc_raw)
+    desc_short = desc_norm[:50]
     doc_num = _extract_doc_num(desc_raw)
 
     keys = []
-
-    # Ключ 1: дата + счёт + номер документа (если есть)
     if doc_num:
         keys.append(("doc", nd, acc, doc_num))
-
-    # Ключ 2: дата + счёт + точная сумма (2 знака)
     keys.append(("exact", nd, acc, amt_exact))
-
-    # Ключ 3: дата + счёт + округлённая сумма
     keys.append(("amt", nd, acc, amt))
-
-    # Ключ 4: дата + счёт + текст без номера (первые 50 символов)
-    # ГЛАВНЫЙ ФИКСдля случая когда старая запись без номера, новая с номером
     if desc_short:
         keys.append(("text", nd, acc, desc_short))
-
-    # Ключ 5: дата + счёт + сумма + текст без номера (самый точный)
     if desc_short:
         keys.append(("amt+text", nd, acc, amt, desc_short))
-
     return keys
 
 def is_duplicate(r, existing_keys: set) -> bool:
@@ -305,9 +282,6 @@ def is_duplicate(r, existing_keys: set) -> bool:
     return False
 
 def build_existing_keys(existing_data) -> tuple:
-    """
-    Строим словарь ключ→номер_строки и множество ключей из существующих данных таблицы.
-    """
     key_to_row = {}
     for i, row in enumerate(existing_data[1:], start=2):
         if len(row) < 9:
@@ -320,7 +294,6 @@ def build_existing_keys(existing_data) -> tuple:
     return key_to_row, set(key_to_row.keys())
 
 def find_existing_row(r, key_to_row: dict):
-    """Ищем номер строки в таблице для дубликата."""
     keys = _build_all_keys(r[3], r[4], r[6], r[8])
     for k in keys:
         if k in key_to_row:
@@ -352,8 +325,6 @@ def get_sheets_data_for_ai():
         account_totals = {}
         article_totals = {}
         for row in rows:
-            if len(row) < 8:
-                continue
             try:
                 month = row[1] if len(row) > 1 else ""
                 amount_str = row[4] if len(row) > 4 else "0"
@@ -559,27 +530,34 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         реестр = spreadsheet.worksheet(SHEET_NAME)
         реестр_data = реестр.get_all_values()
+        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк для '{account_name}'")
 
         total_operations = 0.0
         ops_count = 0
 
+        # ИСПРАВЛЕНИЕ: не используем len(row) < 7, читаем индексы безопасно
         for row in реестр_data[1:]:
-            if len(row) < 7:
+            acc_val = row[6].strip() if len(row) > 6 else ""
+            amt_val = row[4].strip() if len(row) > 4 else ""
+            if not acc_val or not amt_val:
                 continue
-            if _matches_account(row[6], account_name):
+            if _matches_account(acc_val, account_name):
                 try:
-                    total_operations += float(str(row[4]).replace(" ", "").replace(",", "."))
+                    total_operations += float(amt_val.replace(" ", "").replace(",", "."))
                     ops_count += 1
                 except Exception as parse_err:
-                    logger.warning(f"check_balance: не парсится сумма row[4]={repr(row[4])} err={parse_err}")
+                    logger.warning(f"check_balance: не парсится сумма={repr(amt_val)} err={parse_err}")
 
+        # Добавляем extra_rows (новые строки из файла) на случай задержки Sheets
         if extra_rows:
             реестр_keys = set()
             for row in реестр_data[1:]:
-                if len(row) >= 5:
-                    реестр_keys.add((_clean_name_for_match(row[3]), _clean_name_for_match(row[6]), str(row[4]).strip()))
+                d = row[3].strip() if len(row) > 3 else ""
+                a = row[6].strip().lower() if len(row) > 6 else ""
+                v = row[4].strip() if len(row) > 4 else ""
+                реестр_keys.add((d, a, v))
             for r in extra_rows:
-                r_key = (_clean_name_for_match(r[3]), _clean_name_for_match(r[6]), str(r[4]).strip())
+                r_key = (r[3].strip(), r[6].strip().lower(), str(r[4]).strip())
                 if r_key not in реестр_keys and _matches_account(r[6], account_name):
                     try:
                         total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
@@ -591,6 +569,11 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
         dds_balance = round(initial_balance + total_operations, 2)
         source = "Счета2026(Справка)"
 
+        logger.info(
+            f"Сверка '{account_name}': нач={initial_balance}, "
+            f"операций={ops_count}, сумма={total_operations}, "
+            f"ДДС={dds_balance}, банк={bank_balance}"
+        )
         return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
 
     except Exception as e:
@@ -602,10 +585,10 @@ def get_account_rows(account_name):
     spreadsheet = get_spreadsheet()
     реестр = spreadsheet.worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
-
     matched = []
     for i, row in enumerate(реестр_data[1:], start=2):
-        if len(row) >= 7 and _matches_account(row[6], account_name):
+        acc_val = row[6].strip() if len(row) > 6 else ""
+        if acc_val and _matches_account(acc_val, account_name):
             matched.append((i, row))
     return matched
 
@@ -720,7 +703,7 @@ def process_xlsx(file_bytes):
 
     return rows, account, closing_balance, opening_balance
 
-# ============ PDF Kaspi Gold / Справка ============
+# ============ PDF Kaspi Gold ============
 def process_kaspi_gold_pdf(file_bytes):
     rows = []
     account = "Арман каспи голд"
@@ -1048,10 +1031,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if question.startswith("/rows"):
             acc = question[5:].strip()
             if not acc:
-                await update.message.reply_text(
-                    "Укажи название счёта после команды.\n"
-                    "Пример: /rows Каспи ТОО"
-                )
+                await update.message.reply_text("Укажи название счёта после команды.\nПример: /rows Каспи ТОО")
                 return
 
             await update.message.reply_text(f"🔍 Ищу строки для «{acc}»...")
@@ -1098,7 +1078,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg = f"(продолжение {part_idx+1}/{len(chunks)})\n" + part_text
 
                 await update.message.reply_text(msg)
-
             return
 
         await update.message.reply_text("🤔 Думаю...")
@@ -1148,7 +1127,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
 
-        # Строим все ключи из существующих данных таблицы
         key_to_row, existing_keys = build_existing_keys(existing_data)
 
         dupe_sheet_rows = []
