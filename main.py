@@ -550,23 +550,6 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
                 except Exception as parse_err:
                     logger.warning(f"check_balance: не парсится сумма={repr(amt_val)} err={parse_err}")
 
-        # Добавляем extra_rows (новые строки из файла) на случай задержки Sheets
-        if extra_rows:
-            реестр_keys = set()
-            for row in реестр_data[1:]:
-                d = row[3].strip() if len(row) > 3 else ""
-                a = row[6].strip().lower() if len(row) > 6 else ""
-                v = row[4].strip() if len(row) > 4 else ""
-                реестр_keys.add((d, a, v))
-            for r in extra_rows:
-                r_key = (r[3].strip(), r[6].strip().lower(), str(r[4]).strip())
-                if r_key not in реестр_keys and _clean_name_for_match(r[6]) == target_clean:
-                    try:
-                        total_operations += float(str(r[4]).replace(" ", "").replace(",", "."))
-                        ops_count += 1
-                    except:
-                        pass
-
         total_operations = round(total_operations, 2)
         dds_balance = round(initial_balance + total_operations, 2)
         source = "Счета2026(Справка)"
@@ -1195,6 +1178,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows.sort(key=lambda r: datetime.strptime(r[3], "%m/%d/%Y") if r[3] else datetime.min)
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
+        time.sleep(5)  # Ждём пока Sheets обновится
 
         added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n📋 Строки: {added_range}\n"
