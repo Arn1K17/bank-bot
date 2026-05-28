@@ -172,6 +172,40 @@ def parse_справка_num(s):
     except:
         return None
 
+def parse_amount_from_registry(s):
+    """
+    Парсит суммы из реестра Google Sheets.
+    Поддерживает форматы: '-3,000,000' / '15,008,811' / '887,400.29' / '-224327.86'
+    Запятая — всегда разделитель тысяч если есть точка или запятых несколько.
+    """
+    s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
+    if not s:
+        return None
+    dot_count = s.count(".")
+    comma_count = s.count(",")
+    # Есть и точка и запятая: точка — десятичная, запятая — тысячи
+    if dot_count >= 1 and comma_count >= 1:
+        s = s.replace(",", "")
+    # Несколько запятых: все запятые — разделители тысяч
+    elif comma_count > 1:
+        s = s.replace(",", "")
+    # Одна запятая, нет точки
+    elif comma_count == 1 and dot_count == 0:
+        parts = s.lstrip("-").split(",")
+        # Если после запятой 3 цифры — разделитель тысяч (1,000 → 1000)
+        if len(parts) == 2 and len(parts[1]) == 3:
+            s = s.replace(",", "")
+        else:
+            # Европейский десятичный (1,5 → 1.5)
+            s = s.replace(",", ".")
+    # Несколько точек: все точки — разделители тысяч (редко)
+    elif dot_count > 1:
+        s = s.replace(".", "")
+    try:
+        return float(s)
+    except:
+        return None
+
 def make_row(date_str, amount, account, desc, supplier=""):
     year = get_year_from_date(date_str)
     month_oplaty = get_month_from_date(date_str)
@@ -331,7 +365,9 @@ def get_sheets_data_for_ai():
                 amount_str = row[4] if len(row) > 4 else "0"
                 account = row[6] if len(row) > 6 else ""
                 article = row[7] if len(row) > 7 else ""
-                amount = float(str(amount_str).replace(" ", "").replace(",", ".") or 0)
+                amount = parse_amount_from_registry(amount_str)
+                if amount is None:
+                    continue
                 if month:
                     month_totals[month] = month_totals.get(month, 0) + amount
                 if account:
@@ -518,7 +554,7 @@ def _matches_account(row_acc, target):
         return True
     return False
 
-def check_balance(account_name, bank_closing_balance, extra_rows=None):
+def check_balance(account_name, bank_closing_balance):
     try:
         bank_balance = round(bank_closing_balance, 2)
         spreadsheet = get_spreadsheet()
@@ -535,20 +571,25 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         total_operations = 0.0
         ops_count = 0
+        skipped = 0
         target_clean = _clean_name_for_match(account_name)
 
-        # Только точное совпадение названия счёта (после нормализации)
         for row in реестр_data[1:]:
             acc_val = row[6].strip() if len(row) > 6 else ""
             amt_val = row[4].strip() if len(row) > 4 else ""
             if not acc_val or not amt_val:
                 continue
             if _clean_name_for_match(acc_val) == target_clean:
-                try:
-                    total_operations += float(amt_val.replace(" ", "").replace(",", "."))
+                parsed = parse_amount_from_registry(amt_val)
+                if parsed is not None:
+                    total_operations += parsed
                     ops_count += 1
-                except Exception as parse_err:
-                    logger.warning(f"check_balance: не парсится сумма={repr(amt_val)} err={parse_err}")
+                else:
+                    skipped += 1
+                    logger.warning(f"check_balance: не парсится сумма={repr(amt_val)}")
+
+        if skipped > 0:
+            logger.warning(f"check_balance: пропущено {skipped} строк с нечитаемой суммой для '{account_name}'")
 
         total_operations = round(total_operations, 2)
         dds_balance = round(initial_balance + total_operations, 2)
@@ -556,7 +597,7 @@ def check_balance(account_name, bank_closing_balance, extra_rows=None):
 
         logger.info(
             f"Сверка '{account_name}': нач={initial_balance}, "
-            f"операций={ops_count}, сумма={total_operations}, "
+            f"операций={ops_count}, пропущено={skipped}, сумма={total_operations}, "
             f"ДДС={dds_balance}, банк={bank_balance}"
         )
         return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
@@ -578,10 +619,10 @@ def get_account_rows(account_name):
     return matched
 
 
-def build_balance_msg(account, closing_balance, current_rows, opening_balance=None):
+def build_balance_msg(account, closing_balance):
     msg = ""
     if closing_balance is not None:
-        result = check_balance(account, closing_balance, extra_rows=current_rows)
+        result = check_balance(account, closing_balance)
         dds_balance, bank_balance, initial_balance, ops_count, total_operations, source = result
 
         if dds_balance is None:
@@ -1042,7 +1083,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = 0.0
             for _, row in matched:
                 try:
-                    total += float(str(row[4]).replace(" ", "").replace(",", "."))
+                    val = parse_amount_from_registry(row[4])
+                    if val is not None:
+                        total += val
                 except:
                     pass
 
@@ -1150,7 +1193,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ", ".join(ranges)
 
         next_row = len(existing_data) + 1
-        all_rows = rows[:]
 
         if dupes == len(rows):
             dupe_range = format_row_ranges(dupe_sheet_rows)
@@ -1160,7 +1202,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Строки в таблице: {dupe_range}\n"
                 f"Ничего не добавлено."
             )
-            msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
+            msg += build_balance_msg(account, closing_balance)
             msg += f"\n\n🔗 {SPREADSHEET_URL}"
             await update.message.reply_text(msg)
             return
@@ -1182,7 +1224,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n📋 Строки: {added_range}\n"
-        msg += build_balance_msg(account, closing_balance, all_rows, opening_balance)
+        msg += build_balance_msg(account, closing_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
         await update.message.reply_text(msg)
 
