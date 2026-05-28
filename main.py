@@ -232,6 +232,10 @@ def _normalize_amount_exact(amount) -> str:
 
 def _extract_doc_num(desc_clean: str) -> str:
     desc_lower = desc_clean.lower()
+    # 00UBS номер — самый надёжный идентификатор для Халык
+    m = re.search(r'00ubs(\d+)', desc_lower)
+    if m:
+        return "ubs-" + m.group(1)
     m = re.match(r'^(g2-\d+)', desc_lower)
     if m:
         return m.group(1)
@@ -241,9 +245,6 @@ def _extract_doc_num(desc_clean: str) -> str:
     m = re.search(r'референс\s+(\d{8,12})', desc_lower)
     if m:
         return "ref-" + m.group(1)
-    m = re.search(r'00ubs(\d+)', desc_lower)
-    if m:
-        return "ubs-" + m.group(1)
     m = re.match(r'^(\d{7,12})\b', desc_clean)
     if m:
         return m.group(1)
@@ -984,8 +985,17 @@ def process_halyk_pdf(file_bytes):
         date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
         doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
         doc_num = doc_num_m.group(1) if doc_num_m else ""
+        # Ищем 00UBS номер — он стабилен и уникален, используем как главный идентификатор
+        ubs_m = re.search(r'00UBS(\d+)', full_desc)
+        ubs_num = ("00UBS" + ubs_m.group(1)) if ubs_m else ""
         clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
-        desc_with_docnum = f"{doc_num} {clean_desc}".strip() if doc_num else clean_desc
+        # Строим desc: сначала UBS номер (для надёжной дедупликации), потом остальное
+        if ubs_num:
+            desc_with_docnum = f"{ubs_num} {doc_num} {clean_desc}".strip()
+        elif doc_num:
+            desc_with_docnum = f"{doc_num} {clean_desc}".strip()
+        else:
+            desc_with_docnum = clean_desc
         rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
 
     return rows, account, closing_balance, opening_balance
