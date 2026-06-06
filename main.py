@@ -554,6 +554,7 @@ def _matches_account(row_acc, target):
         return True
     return False
 
+# Вариант 2: улучшенная сверка использует гибкое сопоставление счетов
 def check_balance(account_name, bank_closing_balance):
     try:
         bank_balance = round(bank_closing_balance, 2)
@@ -579,7 +580,7 @@ def check_balance(account_name, bank_closing_balance):
             amt_val = row[4].strip() if len(row) > 4 else ""
             if not acc_val or not amt_val:
                 continue
-            if _clean_name_for_match(acc_val) == target_clean:
+            if _matches_account(acc_val, account_name):
                 parsed = parse_amount_from_registry(amt_val)
                 if parsed is not None:
                     total_operations += parsed
