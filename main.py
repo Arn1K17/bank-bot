@@ -554,7 +554,7 @@ def _matches_account(row_acc, target):
         return True
     return False
 
-# Вариант 2: улучшенная сверка использует гибкое сопоставление счетов
+# Вариант 3: расширенная банковская сверка с диагностикой расхождений
 def check_balance(account_name, bank_closing_balance):
     try:
         bank_balance = round(bank_closing_balance, 2)
@@ -643,6 +643,9 @@ def build_balance_msg(account, closing_balance):
             msg += f"  + Операции ({ops_count} строк): {total_operations:,.2f} ₸\n"
             msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
             msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
+                if abs(diff) >= 1:
+                    msg += f"\n\n🔎 Требуется проверка операций и дублей."
+
     else:
         msg += "\n⚠️ Исходящий остаток не найден в файле"
     return msg
