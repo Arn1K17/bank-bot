@@ -305,12 +305,25 @@ def is_duplicate(r, existing_keys: set) -> bool:
     return False
 
 def build_existing_keys(existing_data) -> tuple:
+    """
+    Строим ключи из всех непустых строк таблицы.
+    ВАЖНО: читаем сумму из колонки E (индекс 4) как есть,
+    без parse_amount_from_registry — чтобы не терять точность при сравнении.
+    """
     key_to_row = {}
     for i, row in enumerate(existing_data[1:], start=2):
         if len(row) < 9:
             continue
-        raw_amount = str(row[4]).replace(",", "").replace(" ", "").replace("\xa0", "")
-        keys = _build_all_keys(row[3], raw_amount, row[6], row[8])
+        # Пропускаем полностью пустые строки
+        if not any(str(c).strip() for c in row):
+            continue
+        date_val = str(row[3]).strip()
+        amount_val = str(row[4]).strip().replace(",", "").replace(" ", "").replace("\xa0", "")
+        account_val = str(row[6]).strip()
+        desc_val = str(row[8]).strip()
+        if not date_val or not amount_val or not account_val:
+            continue
+        keys = _build_all_keys(date_val, amount_val, account_val, desc_val)
         for k in keys:
             if k not in key_to_row:
                 key_to_row[k] = i
@@ -322,6 +335,38 @@ def find_existing_row(r, key_to_row: dict):
         if k in key_to_row:
             return key_to_row[k]
     return None
+
+def append_rows_from_col_a(sheet, rows):
+    """
+    Находим первую РЕАЛЬНО пустую строку (все колонки A-K пустые)
+    и пишем данные явно начиная с колонки A.
+    Это гарантирует что данные всегда идут с A, а не с H или другой колонки.
+    """
+    # Получаем все данные чтобы найти последнюю непустую строку
+    all_vals = sheet.get_all_values()
+
+    # Ищем последнюю непустую строку (проверяем колонку A и D — дата)
+    last_row = 1
+    for i, row in enumerate(all_vals, start=1):
+        if any(str(c).strip() for c in row):
+            last_row = i
+
+    start_row = last_row + 1
+
+    if not rows:
+        return start_row
+
+    # Формируем диапазон явно с колонки A
+    end_col = "K"  # у нас 11 колонок (A-K)
+    range_name = f"A{start_row}:{end_col}{start_row + len(rows) - 1}"
+
+    sheet.update(
+        range_name=range_name,
+        values=rows,
+        value_input_option="USER_ENTERED"
+    )
+
+    return start_row
 
 # ============ GROQ AI ============
 def get_sheets_data_for_ai():
@@ -1180,7 +1225,14 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ranges.append(f"{start}-{end}" if start != end else str(start))
             return ", ".join(ranges)
 
-        next_row = len(existing_data) + 1
+        # Считаем следующую строку ДО фильтрации дублей
+        # (нужно для отображения диапазона добавленных строк)
+        all_vals_for_count = sheet.get_all_values()
+        last_filled = 1
+        for i, row in enumerate(all_vals_for_count, start=1):
+            if any(str(c).strip() for c in row):
+                last_filled = i
+        next_row = last_filled + 1
 
         if dupes == len(rows):
             dupe_range = format_row_ranges(dupe_sheet_rows)
@@ -1207,10 +1259,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         rows.sort(key=lambda r: datetime.strptime(r[3], "%m/%d/%Y") if r[3] else datetime.min)
-        sheet.append_rows(rows, value_input_option="USER_ENTERED")
-        time.sleep(5)
 
-        added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
+        # Явно пишем с колонки A, находя первую пустую строку
+        actual_start = append_rows_from_col_a(sheet, rows)
+        time.sleep(3)
+
+        added_range = format_row_ranges(list(range(actual_start, actual_start + len(rows))))
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n📋 Строки: {added_range}\n"
         msg += build_balance_msg(account, closing_balance)
         msg += f"\n\n🔗 {SPREADSHEET_URL}"
