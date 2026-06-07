@@ -583,6 +583,15 @@ def _clean_name_for_match(s):
     words = s.split()
     return " ".join(words).lower()
 
+def _matches_account_strict(row_acc, target):
+    """
+    Строгое совпадение — только точное совпадение названия (без similarity).
+    Используется при сверке остатков чтобы не цеплять похожие счета.
+    """
+    r = _clean_name_for_match(row_acc)
+    t = _clean_name_for_match(target)
+    return r == t
+
 def _matches_account(row_acc, target):
     r = _clean_name_for_match(row_acc)
     t = _clean_name_for_match(target)
@@ -592,56 +601,80 @@ def _matches_account(row_acc, target):
         return True
     return False
 
-def check_balance(account_name, bank_closing_balance):
-    try:
-        bank_balance = round(bank_closing_balance, 2)
-        spreadsheet = get_spreadsheet()
+def get_account_balance(account_name: str):
+    """
+    Считает ДДС ТОЧНО так же как get_sheets_data_for_ai:
+    начальный остаток из Справки + все операции из реестра по этому счёту.
+    Возвращает (initial, ops_total, dds, ops_count).
+    """
+    spreadsheet = get_spreadsheet()
 
+    # 1. Начальный остаток из Справки
+    initial = 0.0
+    try:
         справка = spreadsheet.worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
-        matched_name, initial_balance = find_account_in_справка(account_name, справка_data)
-        if initial_balance is None:
-            return None, None, None, None, None, f"Счет '{account_name}' не найден в Счета2026(Справка)"
-
-        реестр = spreadsheet.worksheet(SHEET_NAME)
-        реестр_data = реестр.get_all_values()
-        logger.info(f"check_balance: реестр вернул {len(реестр_data)} строк для '{account_name}'")
-
-        total_operations = 0.0
-        ops_count = 0
-        skipped = 0
-
-        for row in реестр_data[1:]:
-            acc_val = row[6].strip() if len(row) > 6 else ""
-            amt_val = row[4].strip() if len(row) > 4 else ""
-            if not acc_val or not amt_val:
-                continue
-            if _matches_account(acc_val, account_name):
-                parsed = parse_amount_from_registry(amt_val)
-                if parsed is not None:
-                    total_operations += parsed
-                    ops_count += 1
-                else:
-                    skipped += 1
-                    logger.warning(f"check_balance: не парсится сумма={repr(amt_val)}")
-
-        if skipped > 0:
-            logger.warning(f"check_balance: пропущено {skipped} строк с нечитаемой суммой для '{account_name}'")
-
-        total_operations = round(total_operations, 2)
-        dds_balance = round(initial_balance + total_operations, 2)
-        source = "Счета2026(Справка)"
-
-        logger.info(
-            f"Сверка '{account_name}': нач={initial_balance}, "
-            f"операций={ops_count}, пропущено={skipped}, сумма={total_operations}, "
-            f"ДДС={dds_balance}, банк={bank_balance}"
-        )
-        return dds_balance, bank_balance, initial_balance, ops_count, total_operations, source
-
+        _, bal = find_account_in_справка(account_name, справка_data)
+        if bal is not None:
+            initial = bal
     except Exception as e:
-        logger.error(f"check_balance error: {e}")
-        return None, None, None, None, None, str(e)
+        logger.warning(f"get_account_balance: справка error: {e}")
+
+    # 2. Суммируем операции из реестра по этому счёту
+    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    ops_total = 0.0
+    ops_count = 0
+    for row in реестр_data[1:]:
+        acc_val = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val = str(row[4]).strip() if len(row) > 4 else ""
+        if not acc_val or not amt_val:
+            continue
+        if _matches_account_strict(acc_val, account_name):
+            parsed = parse_amount_from_registry(amt_val)
+            if parsed is not None:
+                ops_total += parsed
+                ops_count += 1
+
+    dds = round(initial + ops_total, 2)
+    return initial, round(ops_total, 2), dds, ops_count
+
+
+def build_balance_msg(account, bank_closing_balance):
+    """
+    Сверяет банковский исходящий остаток с ДДС.
+    ДДС считается через get_account_balance — та же логика что /filter.
+    """
+    if bank_closing_balance is None:
+        return "\n⚠️ Исходящий остаток не найден в файле"
+
+    try:
+        initial, ops_total, dds, ops_count = get_account_balance(account)
+        bank_balance = round(bank_closing_balance, 2)
+        diff = round(bank_balance - dds, 2)
+
+        msg = ""
+        if abs(diff) < 1:
+            msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
+        else:
+            msg += f"\n❌ Остаток НЕ сходится!\n"
+            msg += f"  Банк: {bank_balance:,.2f} ₸\n"
+            msg += f"  ДДС:  {dds:,.2f} ₸\n"
+            msg += f"  Разница: {diff:,.2f} ₸"
+
+        msg += f"\n\n📊 Расчёт ДДС:\n"
+        msg += f"  Нач. остаток (Справка): {initial:,.2f} ₸\n"
+        msg += f"  + Операции ({ops_count} строк): {ops_total:,.2f} ₸\n"
+        msg += f"  = Итого ДДС: {dds:,.2f} ₸\n"
+        msg += f"\n🏦 Банк (исходящий): {bank_balance:,.2f} ₸"
+
+        if abs(diff) >= 1:
+            msg += f"\n\n🔎 Требуется проверка операций и дублей."
+
+        return msg
+    except Exception as e:
+        return f"\n⚠️ Ошибка сверки: {e}"
 
 
 def get_account_rows(account_name):
@@ -656,35 +689,7 @@ def get_account_rows(account_name):
     return matched
 
 
-def build_balance_msg(account, closing_balance):
-    msg = ""
-    if closing_balance is not None:
-        result = check_balance(account, closing_balance)
-        dds_balance, bank_balance, initial_balance, ops_count, total_operations, source = result
 
-        if dds_balance is None:
-            msg += f"\n⚠️ Сверка: {source}"
-        else:
-            diff = round(bank_balance - dds_balance, 2)
-            if abs(diff) < 1:
-                msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
-            else:
-                msg += f"\n❌ Остаток НЕ сходится!\n"
-                msg += f"  Банк: {bank_balance:,.2f} ₸\n"
-                msg += f"  ДДС:  {dds_balance:,.2f} ₸\n"
-                msg += f"  Разница: {diff:,.2f} ₸"
-
-            msg += f"\n\n📊 Расчёт ДДС:\n"
-            msg += f"  Начальный остаток ({source}): {initial_balance:,.2f} ₸\n"
-            msg += f"  + Операции ({ops_count} строк): {total_operations:,.2f} ₸\n"
-            msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
-            msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
-            if abs(diff) >= 1:
-                msg += f"\n\n🔎 Требуется проверка операций и дублей."
-
-    else:
-        msg += "\n⚠️ Исходящий остаток не найден в файле"
-    return msg
 
 # ============ XLSX ============
 def process_xlsx(file_bytes):
