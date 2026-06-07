@@ -305,16 +305,10 @@ def is_duplicate(r, existing_keys: set) -> bool:
     return False
 
 def build_existing_keys(existing_data) -> tuple:
-    """
-    Строим ключи из всех непустых строк таблицы.
-    ВАЖНО: читаем сумму из колонки E (индекс 4) как есть,
-    без parse_amount_from_registry — чтобы не терять точность при сравнении.
-    """
     key_to_row = {}
     for i, row in enumerate(existing_data[1:], start=2):
         if len(row) < 9:
             continue
-        # Пропускаем полностью пустые строки
         if not any(str(c).strip() for c in row):
             continue
         date_val = str(row[3]).strip()
@@ -337,40 +331,25 @@ def find_existing_row(r, key_to_row: dict):
     return None
 
 def append_rows_from_col_a(sheet, rows):
-    """
-    Находим последнюю строку где колонка A (год) ИЛИ колонка D (дата) непустые.
-    Это игнорирует мусор в других колонках (H и т.д.) и пишет строго после
-    последней нормальной строки данных, начиная с колонки A.
-    """
     all_vals = sheet.get_all_values()
-
-    # Ищем последнюю строку у которой есть данные в колонке A (индекс 0) или D (индекс 3)
-    # Колонка A = год (2026), колонка D = дата в формате MM/DD/YYYY
     last_row = 1
     for i, row in enumerate(all_vals, start=1):
         col_a = str(row[0]).strip() if len(row) > 0 else ""
         col_d = str(row[3]).strip() if len(row) > 3 else ""
-        # Считаем строку "нормальной" только если в A есть год или в D есть дата
         has_year = bool(re.match(r'^\d{4}$', col_a))
         has_date = bool(re.match(r'^\d{2}/\d{2}/\d{4}$', col_d))
         if has_year or has_date:
             last_row = i
-
     start_row = last_row + 1
-
     if not rows:
         return start_row
-
-    # Формируем диапазон явно с колонки A
-    end_col = "K"  # у нас 11 колонок (A-K)
+    end_col = "K"
     range_name = f"A{start_row}:{end_col}{start_row + len(rows) - 1}"
-
     sheet.update(
         range_name=range_name,
         values=rows,
         value_input_option="USER_ENTERED"
     )
-
     return start_row
 
 # ============ GROQ AI ============
@@ -584,10 +563,6 @@ def _clean_name_for_match(s):
     return " ".join(words).lower()
 
 def _matches_account_strict(row_acc, target):
-    """
-    Строгое совпадение — только точное совпадение названия (без similarity).
-    Используется при сверке остатков чтобы не цеплять похожие счета.
-    """
     r = _clean_name_for_match(row_acc)
     t = _clean_name_for_match(target)
     return r == t
@@ -602,14 +577,7 @@ def _matches_account(row_acc, target):
     return False
 
 def get_account_balance(account_name: str):
-    """
-    Считает ДДС ТОЧНО так же как get_sheets_data_for_ai:
-    начальный остаток из Справки + все операции из реестра по этому счёту.
-    Возвращает (initial, ops_total, dds, ops_count).
-    """
     spreadsheet = get_spreadsheet()
-
-    # 1. Начальный остаток из Справки
     initial = 0.0
     try:
         справка = spreadsheet.worksheet("Счета2026(Справка)")
@@ -620,7 +588,6 @@ def get_account_balance(account_name: str):
     except Exception as e:
         logger.warning(f"get_account_balance: справка error: {e}")
 
-    # 2. Суммируем операции из реестра по этому счёту
     реестр = spreadsheet.worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
 
@@ -640,20 +607,13 @@ def get_account_balance(account_name: str):
     dds = round(initial + ops_total, 2)
     return initial, round(ops_total, 2), dds, ops_count
 
-
 def build_balance_msg(account, bank_closing_balance):
-    """
-    Сверяет банковский исходящий остаток с ДДС.
-    ДДС считается через get_account_balance — та же логика что /filter.
-    """
     if bank_closing_balance is None:
         return "\n⚠️ Исходящий остаток не найден в файле"
-
     try:
         initial, ops_total, dds, ops_count = get_account_balance(account)
         bank_balance = round(bank_closing_balance, 2)
         diff = round(bank_balance - dds, 2)
-
         msg = ""
         if abs(diff) < 1:
             msg += f"\n✅ Остаток сходится: {bank_balance:,.2f} ₸"
@@ -662,20 +622,16 @@ def build_balance_msg(account, bank_closing_balance):
             msg += f"  Банк: {bank_balance:,.2f} ₸\n"
             msg += f"  ДДС:  {dds:,.2f} ₸\n"
             msg += f"  Разница: {diff:,.2f} ₸"
-
         msg += f"\n\n📊 Расчёт ДДС:\n"
         msg += f"  Нач. остаток (Справка): {initial:,.2f} ₸\n"
         msg += f"  + Операции ({ops_count} строк): {ops_total:,.2f} ₸\n"
         msg += f"  = Итого ДДС: {dds:,.2f} ₸\n"
         msg += f"\n🏦 Банк (исходящий): {bank_balance:,.2f} ₸"
-
         if abs(diff) >= 1:
             msg += f"\n\n🔎 Требуется проверка операций и дублей."
-
         return msg
     except Exception as e:
         return f"\n⚠️ Ошибка сверки: {e}"
-
 
 def get_account_rows(account_name):
     spreadsheet = get_spreadsheet()
@@ -687,9 +643,6 @@ def get_account_rows(account_name):
         if acc_val and _matches_account(acc_val, account_name):
             matched.append((i, row))
     return matched
-
-
-
 
 # ============ XLSX ============
 def process_xlsx(file_bytes):
@@ -889,6 +842,8 @@ def process_bcc_pdf(file_bytes):
         m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
         if not m:
             m = re.search(r"ЖСК\s*/\s*ИИК\s+(KZ\w+)", full_text)
+        if not m:
+            m = re.search(r"IBAN[:\s]+(KZ\w+)", full_text)
         if m:
             iban = m.group(1).strip()
             account = IBAN_MAP.get(iban, iban)
@@ -964,6 +919,10 @@ def process_bcc_pdf(file_bytes):
             c7 = str(row[7] or "").replace("\n", " ").strip()
             c8 = str(row[8] or "").replace("\n", " ").strip()
             c11 = str(row[11] or "").replace("\n", " ").strip()
+
+            # Убираем валютную часть "(- 66,00 USD)" — берём только тенге
+            c7 = re.sub(r'\(.*?(?:USD|EUR|RUB|CNY).*?\)', '', c7, flags=re.IGNORECASE).strip()
+            c8 = re.sub(r'\(.*?(?:USD|EUR|RUB|CNY).*?\)', '', c8, flags=re.IGNORECASE).strip()
 
             if "итого" in c1.lower() or "жиынтығы" in c1.lower():
                 continue
@@ -1235,8 +1194,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ranges.append(f"{start}-{end}" if start != end else str(start))
             return ", ".join(ranges)
 
-        # Считаем следующую строку ДО фильтрации дублей
-        # (нужно для отображения диапазона добавленных строк)
         all_vals_for_count = sheet.get_all_values()
         last_filled = 1
         for i, row in enumerate(all_vals_for_count, start=1):
@@ -1270,7 +1227,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows.sort(key=lambda r: datetime.strptime(r[3], "%m/%d/%Y") if r[3] else datetime.min)
 
-        # Явно пишем с колонки A, находя первую пустую строку
         actual_start = append_rows_from_col_a(sheet, rows)
         time.sleep(3)
 
