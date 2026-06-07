@@ -59,7 +59,6 @@ def format_date(val):
         return val.strftime("%m/%d/%Y")
     s = str(val).replace("\n", "").strip()
     s = re.sub(r'\s+\d{1,2}:\d{2}(:\d{2})?$', '', s).strip()
-
     m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', s)
     if m:
         part1, part2, y = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -68,14 +67,12 @@ def format_date(val):
         if part2 > 12:
             return f"{part1:02d}/{part2:02d}/{y}"
         return f"{part1:02d}/{part2:02d}/{y}"
-
     m = re.search(r"(\d{1,2})[.\-](\d{1,2})[.\-](\d{2,4})", s)
     if m:
         d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
         if len(y) == 2:
             y = "20" + y
         return f"{mo:02d}/{d:02d}/{y}"
-
     return s
 
 def get_year_from_date(date_str):
@@ -280,12 +277,10 @@ def _build_all_keys(date, amount, account, desc):
     acc = str(account).strip()
     amt = _normalize_amount(amount)
     amt_exact = _normalize_amount_exact(amount)
-
     desc_raw = re.sub(r'\s+', ' ', str(desc).replace("\n", " ").replace("\r", " ")).strip()
     desc_norm = _normalize_desc(desc_raw)
     desc_short = desc_norm[:50]
     doc_num = _extract_doc_num(desc_raw)
-
     keys = []
     if doc_num:
         keys.append(("doc", nd, acc, doc_num))
@@ -345,11 +340,7 @@ def append_rows_from_col_a(sheet, rows):
         return start_row
     end_col = "K"
     range_name = f"A{start_row}:{end_col}{start_row + len(rows) - 1}"
-    sheet.update(
-        range_name=range_name,
-        values=rows,
-        value_input_option="USER_ENTERED"
-    )
+    sheet.update(range_name=range_name, values=rows, value_input_option="USER_ENTERED")
     return start_row
 
 # ============ GROQ AI ============
@@ -590,7 +581,6 @@ def get_account_balance(account_name: str):
 
     реестр = spreadsheet.worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
-
     ops_total = 0.0
     ops_count = 0
     for row in реестр_data[1:]:
@@ -728,6 +718,63 @@ def process_xlsx(file_bytes):
     return rows, account, closing_balance, opening_balance
 
 # ============ PDF Kaspi Gold ============
+def _parse_kaspi_text_lines(all_text, account):
+    """
+    Текстовый парсер для Каспи Gold/депозит выписок.
+    Формат строки: DD.MM.YY [+/-] сумма ₸ Операция Детали
+    Строки вида "(- 66,00 USD)" добавляются в описание предыдущей операции.
+    """
+    rows = []
+    lines = all_text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        m = re.match(
+            r'^(\d{2}\.\d{2}\.\d{2,4})\s+([+\-])\s*([\d\s]+,\d{2})\s*₸\s+(.+)$',
+            line
+        )
+        if m:
+            date_raw = m.group(1)
+            sign = 1 if m.group(2) == '+' else -1
+            amt_str = m.group(3).replace(" ", "").replace(",", ".")
+            desc = m.group(4).strip()
+
+            # Смотрим следующие строки — могут быть продолжение описания или USD
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt:
+                    j += 1
+                    continue
+                # Если следующая строка — новая операция, останавливаемся
+                if re.match(r'^\d{2}\.\d{2}\.\d{2,4}', nxt):
+                    break
+                # Строка с валютой вида "(- 66,00 USD)" — добавляем в описание
+                if re.match(r'^\([-+]?\s*[\d\s]+[,.][\d]+\s*(USD|EUR|RUB|CNY)\)', nxt, re.IGNORECASE):
+                    desc = f"{desc} {nxt}".strip()
+                    j += 1
+                    continue
+                # Строка начинается с "(" но не валюта — пропускаем
+                if nxt.startswith("("):
+                    j += 1
+                    continue
+                # Обычное продолжение описания (напр. "своего счета")
+                desc = f"{desc} {nxt}".strip()
+                j += 1
+                break  # берём только одну строку продолжения
+
+            i = j  # прыгаем к следующей необработанной строке
+
+            try:
+                amount = sign * float(amt_str)
+                date_str = format_date(date_raw)
+                rows.append(make_row(date_str, amount, account, desc))
+            except:
+                pass
+        else:
+            i += 1
+    return rows
+
 def process_kaspi_gold_pdf(file_bytes):
     rows = []
     account = "Арман каспи голд"
@@ -742,18 +789,22 @@ def process_kaspi_gold_pdf(file_bytes):
 
         is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
 
-        m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", first_text)
+        # Определяем счёт по IBAN
+        m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", all_text)
+        if not m_iban:
+            m_iban = re.search(r"счет[оом]*\s+(KZ\w+)", all_text, re.IGNORECASE)
         if m_iban:
             iban = m_iban.group(1).strip()
             account = IBAN_MAP.get(iban, account)
-        elif "KZ97722C000015235365" in first_text:
+        elif "KZ97722C000015235365" in all_text:
             account = IBAN_MAP.get("KZ97722C000015235365", account)
-        elif "KZ19722RU00001041014" in first_text:
+        elif "KZ19722RU00001041014" in all_text:
             account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
 
         if not is_deposit:
+            # Остаток: "Доступно на DD.MM.YY: + сумма ₸"
             bal_matches = re.findall(
-                r"Доступно на\s+(\d{2}\.\d{2}\.\d{2,4})[:\s]*\+\s*([\d\s]+[,.][\d]+)\s*₸",
+                r"Доступно на\s+(\d{2}\.\d{2}\.\d{2,4})[:\s]*[+\-]?\s*([\d\s]+,\d+)\s*₸",
                 all_text
             )
             if len(bal_matches) >= 2:
@@ -762,37 +813,40 @@ def process_kaspi_gold_pdf(file_bytes):
             elif len(bal_matches) == 1:
                 closing_balance = parse_num(bal_matches[0][1])
 
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    for row in table:
-                        if not row or len(row) < 3:
-                            continue
-                        date_cell = str(row[0] or "").strip()
-                        amount_cell = str(row[1] or "").strip()
-                        op_cell = str(row[2] or "").strip() if len(row) > 2 else ""
-                        det_cell = str(row[3] or "").strip() if len(row) > 3 else ""
-                        desc_cell = f"{op_cell} {det_cell}".strip()
+            # Текстовый парсинг (основной для этого формата PDF)
+            rows = _parse_kaspi_text_lines(all_text, account)
 
-                        if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
-                            continue
-
-                        amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
-                        sign = 1
-                        if amount_clean.startswith("-"):
-                            sign = -1
-                            amount_clean = amount_clean[1:]
-                        elif amount_clean.startswith("+"):
-                            amount_clean = amount_clean[1:]
-                        try:
-                            amount = sign * float(amount_clean)
-                        except:
-                            continue
-
-                        date_str = format_date(date_cell)
-                        rows.append(make_row(date_str, amount, account, desc_cell))
+            # Fallback на таблицы если текстовый не нашёл строки
+            if not rows:
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        for row in table:
+                            if not row or len(row) < 3:
+                                continue
+                            date_cell = str(row[0] or "").strip()
+                            amount_cell = str(row[1] or "").strip()
+                            op_cell = str(row[2] or "").strip() if len(row) > 2 else ""
+                            det_cell = str(row[3] or "").strip() if len(row) > 3 else ""
+                            desc_cell = f"{op_cell} {det_cell}".strip()
+                            if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
+                                continue
+                            amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
+                            sign = 1
+                            if amount_clean.startswith("-"):
+                                sign = -1
+                                amount_clean = amount_clean[1:]
+                            elif amount_clean.startswith("+"):
+                                amount_clean = amount_clean[1:]
+                            try:
+                                amount = sign * float(amount_clean)
+                            except:
+                                continue
+                            date_str = format_date(date_cell)
+                            rows.append(make_row(date_str, amount, account, desc_cell))
 
         else:
+            # Депозит
             dep_matches = re.findall(
                 r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
                 all_text
@@ -803,27 +857,13 @@ def process_kaspi_gold_pdf(file_bytes):
             elif len(dep_matches) == 1:
                 closing_balance = parse_num(dep_matches[0])
 
-            lines = all_text.split("\n")
-            for line in lines:
-                line = line.strip()
-                m = re.match(
-                    r"^(\d{2}\.\d{2}\.\d{2,4})\s+([+\-][\d\s]+[,.][\d]+)\s*₸\s+(.+)$",
-                    line
-                )
-                if m:
-                    date_str = format_date(m.group(1))
-                    amount_raw = m.group(2).replace(" ", "").replace(",", ".")
-                    try:
-                        amount = float(amount_raw)
-                    except:
-                        continue
-                    desc = m.group(3).strip()
-                    rows.append(make_row(date_str, amount, account, desc))
+            rows = _parse_kaspi_text_lines(all_text, account)
 
     if opening_balance is None and closing_balance is not None and rows:
         total_ops = sum(float(r[4]) for r in rows)
         opening_balance = round(closing_balance - total_ops, 2)
 
+    logger.info(f"Kaspi Gold: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
     return rows, account, closing_balance, opening_balance
 
 # ============ PDF BCC ============
