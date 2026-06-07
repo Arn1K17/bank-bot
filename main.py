@@ -173,32 +173,21 @@ def parse_справка_num(s):
         return None
 
 def parse_amount_from_registry(s):
-    """
-    Парсит суммы из реестра Google Sheets.
-    Поддерживает форматы: '-3,000,000' / '15,008,811' / '887,400.29' / '-224327.86'
-    Запятая — всегда разделитель тысяч если есть точка или запятых несколько.
-    """
     s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
     if not s:
         return None
     dot_count = s.count(".")
     comma_count = s.count(",")
-    # Есть и точка и запятая: точка — десятичная, запятая — тысячи
     if dot_count >= 1 and comma_count >= 1:
         s = s.replace(",", "")
-    # Несколько запятых: все запятые — разделители тысяч
     elif comma_count > 1:
         s = s.replace(",", "")
-    # Одна запятая, нет точки
     elif comma_count == 1 and dot_count == 0:
         parts = s.lstrip("-").split(",")
-        # Если после запятой 3 цифры — разделитель тысяч (1,000 → 1000)
         if len(parts) == 2 and len(parts[1]) == 3:
             s = s.replace(",", "")
         else:
-            # Европейский десятичный (1,5 → 1.5)
             s = s.replace(",", ".")
-    # Несколько точек: все точки — разделители тысяч (редко)
     elif dot_count > 1:
         s = s.replace(".", "")
     try:
@@ -266,7 +255,6 @@ def _normalize_amount_exact(amount) -> str:
 
 def _extract_doc_num(desc_clean: str) -> str:
     desc_lower = desc_clean.lower()
-    # 00UBS номер — самый надёжный идентификатор для Халык
     m = re.search(r'00ubs(\d+)', desc_lower)
     if m:
         return "ubs-" + m.group(1)
@@ -554,7 +542,6 @@ def _matches_account(row_acc, target):
         return True
     return False
 
-# Вариант 3: расширенная банковская сверка с диагностикой расхождений
 def check_balance(account_name, bank_closing_balance):
     try:
         bank_balance = round(bank_closing_balance, 2)
@@ -573,7 +560,6 @@ def check_balance(account_name, bank_closing_balance):
         total_operations = 0.0
         ops_count = 0
         skipped = 0
-        target_clean = _clean_name_for_match(account_name)
 
         for row in реестр_data[1:]:
             acc_val = row[6].strip() if len(row) > 6 else ""
@@ -643,8 +629,8 @@ def build_balance_msg(account, closing_balance):
             msg += f"  + Операции ({ops_count} строк): {total_operations:,.2f} ₸\n"
             msg += f"  = Итого ДДС: {dds_balance:,.2f} ₸\n"
             msg += f"\n🏦 Банк (исходящий остаток): {bank_balance:,.2f} ₸"
-                if abs(diff) >= 1:
-                    msg += f"\n\n🔎 Требуется проверка операций и дублей."
+            if abs(diff) >= 1:
+                msg += f"\n\n🔎 Требуется проверка операций и дублей."
 
     else:
         msg += "\n⚠️ Исходящий остаток не найден в файле"
@@ -1014,11 +1000,9 @@ def process_halyk_pdf(file_bytes):
         date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
         doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
         doc_num = doc_num_m.group(1) if doc_num_m else ""
-        # Ищем 00UBS номер — он стабилен и уникален, используем как главный идентификатор
         ubs_m = re.search(r'00UBS(\d+)', full_desc)
         ubs_num = ("00UBS" + ubs_m.group(1)) if ubs_m else ""
         clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
-        # Строим desc: сначала UBS номер (для надёжной дедупликации), потом остальное
         if ubs_num:
             desc_with_docnum = f"{ubs_num} {doc_num} {clean_desc}".strip()
         elif doc_num:
@@ -1224,7 +1208,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows.sort(key=lambda r: datetime.strptime(r[3], "%m/%d/%Y") if r[3] else datetime.min)
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
-        time.sleep(5)  # Ждём пока Sheets обновится
+        time.sleep(5)
 
         added_range = format_row_ranges(list(range(next_row, next_row + len(rows))))
         msg = f"✅ Готово! Добавлено {len(rows)} строк\nСчет: {account}\n📋 Строки: {added_range}\n"
