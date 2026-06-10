@@ -24,7 +24,7 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-WEBHOOK_URL = "https://bank-bot-5f5g.onrender.com"
+WEBHOOK_URL = "https://bank-bot-w89l.onrender.com"
 PORT = int(os.getenv("PORT", "10000"))
 
 IBAN_MAP = {
