@@ -802,7 +802,7 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
     return matches
 
 
-def get_main_cash_summary():
+def get_main_cash_summary(verbose=False):
     """Текущие остатки по всем счетам (на дату последней операции)."""
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
@@ -835,10 +835,13 @@ def get_main_cash_summary():
         ops = ops_by_account[acc]
         current = round(initial + ops, 2)
         total += current
-        lines.append(
-            f"  {acc}: {current:,.0f} тг"
-            f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
-        )
+        if verbose:
+            lines.append(
+                f"  {acc}: {current:,.0f} тг"
+                f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
+            )
+        else:
+            lines.append(f"  {acc}: {current:,.0f} тг")
 
     result = f"Остатки по всем счетам на {data_date}:\n"
     result += "\n".join(lines)
@@ -867,13 +870,11 @@ def _resolve_target_date_for_month(month: int, year: int) -> tuple:
     current_year = now.year
     current_month = now.month
 
-    # Если запрошенный год/месяц уже в прошлом — конец того месяца
     if (year < current_year) or (year == current_year and month < current_month):
         target_dt = _last_day_of_month(year, month)
         label = target_dt.strftime("%d.%m.%Y")
         return target_dt, label
 
-    # Иначе (текущий или будущий месяц) — последняя операция в реестре
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
     last_op_dt = get_last_operation_datetime(реестр_data)
@@ -881,10 +882,11 @@ def _resolve_target_date_for_month(month: int, year: int) -> tuple:
     return last_op_dt, label
 
 
-def get_main_cash_summary_on_date(target_date: datetime):
+def get_main_cash_summary_on_date(target_date: datetime, verbose=False):
     """
     Остатки по ВСЕМ счетам на указанную дату.
-    Показывает каждый счёт из MAIN_CASH_ACCOUNTS без исключений.
+    verbose=False — только суммы (для ответов на вопросы пользователя).
+    verbose=True  — с деталями нач./обороты (для сверки выписок).
     """
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
@@ -926,10 +928,13 @@ def get_main_cash_summary_on_date(target_date: datetime):
         ops = ops_by_account[acc]
         current = round(initial + ops, 2)
         total += current
-        lines.append(
-            f"  {acc}: {current:,.0f} тг"
-            f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
-        )
+        if verbose:
+            lines.append(
+                f"  {acc}: {current:,.0f} тг"
+                f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
+            )
+        else:
+            lines.append(f"  {acc}: {current:,.0f} тг")
 
     result = f"Остатки по всем счетам на {date_label}:\n"
     result += "\n".join(lines)
@@ -1270,9 +1275,6 @@ ALL_ACCOUNTS_KEYWORDS = [
     "итого по всем", "общая сумма",
 ]
 
-# ────────────────────────────────────────────────────────────
-# НОВЫЕ: вопросы вида "остаток на [месяц]" / "какой остаток на [месяц]"
-# ────────────────────────────────────────────────────────────
 BALANCE_ON_MONTH_KEYWORDS = [
     "остаток на",
     "остатки на",
@@ -1399,20 +1401,12 @@ def _is_turnover_intent_question(text: str) -> bool:
 
 
 def _is_balance_on_month_question(text: str) -> bool:
-    """
-    Возвращает True если вопрос про остаток/баланс на конкретный месяц.
-    Например: "остаток на май", "какой остаток на март", "баланс на январь".
-    НЕ срабатывает на вопросы про обороты/расходы.
-    """
     t = text.lower().strip()
-    # Сначала убедимся что в тексте есть месяц
     has_month = _extract_month_from_question(t) is not None
     if not has_month:
         return False
-    # Убедимся что это не вопрос про обороты/расходы
     if _is_turnover_intent_question(t):
         return False
-    # Проверяем ключевые слова остатков с месяцем
     return any(kw in t for kw in BALANCE_ON_MONTH_KEYWORDS)
 
 
@@ -1479,15 +1473,13 @@ def ask_ai(question: str) -> str:
                         ops_count += 1
             dds = round(initial + ops_total, 2)
             return (
-                f"Основная касса (Сейф) на {data_date}: {dds:,.0f} тг\n"
-                f"  Нач. остаток: {initial:,.0f} тг\n"
-                f"  + Обороты ({ops_count} оп.): {ops_total:,.0f} тг"
+                f"Основная касса (Сейф) на {data_date}: {dds:,.0f} тг"
             )
         except Exception as e:
             logger.error(f"seyf balance error: {e}")
             return f"❌ Ошибка при расчёте основной кассы (Сейф): {e}"
 
-    # ── НОВЫЙ БЛОК 3: остаток на конкретный месяц ──────────────────
+    # 3. Остаток на конкретный месяц
     if _is_balance_on_month_question(question):
         month_num = _extract_month_from_question(question)
         if month_num:
@@ -1495,8 +1487,7 @@ def ask_ai(question: str) -> str:
                 now = datetime.now()
                 year = now.year
                 target_dt, label = _resolve_target_date_for_month(month_num, year)
-                summary_text, _ = get_main_cash_summary_on_date(target_dt)
-                # Если label содержит "(последняя операция)" — заменим заголовок
+                summary_text, _ = get_main_cash_summary_on_date(target_dt, verbose=False)
                 if "последняя операция" in label:
                     summary_text = summary_text.replace(
                         f"Остатки по всем счетам на {target_dt.strftime('%d.%m.%Y')}:",
@@ -1512,7 +1503,6 @@ def ask_ai(question: str) -> str:
     _has_turnover_intent = _is_turnover_intent_question(question)
     _has_money_with_date = _is_all_accounts_question(question) and len(_dates) > 0
 
-    # Если есть намерение оборотов, но нет явных дат — извлекаем месяц
     if _has_turnover_intent and not _dates:
         month_num = _extract_month_from_question(question)
         if month_num:
@@ -1537,7 +1527,7 @@ def ask_ai(question: str) -> str:
             logger.error(f"get_turnover_for_range error: {e}")
             return f"❌ Ошибка при расчёте оборотов: {e}"
 
-    # 5. Сводка по всем счетам (без даты / с месяцем)
+    # 5. Сводка по всем счетам
     if _is_all_accounts_question(question):
         month_filter = _extract_month_from_question(question)
         if month_filter:
@@ -1545,14 +1535,14 @@ def ask_ai(question: str) -> str:
                 now = datetime.now()
                 year = now.year
                 target_dt, label = _resolve_target_date_for_month(month_filter, year)
-                summary_text, _ = get_main_cash_summary_on_date(target_dt)
+                summary_text, _ = get_main_cash_summary_on_date(target_dt, verbose=False)
                 return summary_text
             except Exception as e:
                 logger.error(f"get_main_cash_summary_on_date error: {e}")
                 return f"❌ Ошибка при расчёте за месяц: {e}"
         else:
             try:
-                summary_text, _ = get_main_cash_summary()
+                summary_text, _ = get_main_cash_summary(verbose=False)
                 return summary_text
             except Exception as e:
                 logger.error(f"get_main_cash_summary error: {e}")
@@ -1902,14 +1892,12 @@ def ask_ai(question: str) -> str:
                         result_content = f"Ошибка: {ops_count}"
                     else:
                         result_content = (
-                            f"Остаток по счёту '{acc}' на {date_str}:\n"
-                            f"  Нач. остаток: {initial:,.2f} тг\n"
-                            f"  + Операции ({ops_count} строк): {ops_total:,.2f} тг\n"
-                            f"  = Итого: {balance:,.2f} тг"
+                            f"Остаток по счёту '{acc}' на {date_str}: {balance:,.2f} тг"
                         )
 
                 elif tool_name == "get_all_accounts_summary":
-                    summary_text, _ = get_main_cash_summary()
+                    # verbose=False — без деталей нач./обороты
+                    summary_text, _ = get_main_cash_summary(verbose=False)
                     result_content = summary_text
 
                 elif tool_name == "get_all_accounts_summary_on_month":
@@ -1918,8 +1906,8 @@ def ask_ai(question: str) -> str:
                     year = int(tool_input.get("year", now.year))
                     try:
                         target_dt, label = _resolve_target_date_for_month(month, year)
-                        summary_text, _ = get_main_cash_summary_on_date(target_dt)
-                        # Подменяем дату в заголовке на понятный label если текущий месяц
+                        # verbose=False — без деталей нач./обороты
+                        summary_text, _ = get_main_cash_summary_on_date(target_dt, verbose=False)
                         if "последняя операция" in label:
                             summary_text = summary_text.replace(
                                 f"Остатки по всем счетам на {target_dt.strftime('%d.%m.%Y')}:",
@@ -1949,11 +1937,7 @@ def ask_ai(question: str) -> str:
                                 ops_total += parsed
                                 ops_count += 1
                     dds = round(initial + ops_total, 2)
-                    result_content = (
-                        f"Основная касса (Сейф) на {data_date}: {dds:,.2f} тг\n"
-                        f"  Нач. остаток: {initial:,.2f} тг\n"
-                        f"  + Обороты ({ops_count} оп.): {ops_total:,.2f} тг"
-                    )
+                    result_content = f"Основная касса (Сейф) на {data_date}: {dds:,.2f} тг"
 
                 elif tool_name == "find_operation_by_amount":
                     amount = float(tool_input.get("amount", 0))
