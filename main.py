@@ -24,51 +24,25 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-WEBHOOK_URL = "https://bank-bot-w89l.onrender.com"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-service.onrender.com")
 PORT = int(os.getenv("PORT", "10000"))
 
 IBAN_MAP = {
-    "KZ81722S000020084562": "Каспи Имангазиева Зухра",
-    "KZ97722S000050068041": "Каспи СЕРИК",
-    "KZ38722S000002562577": "Каспи Орынбаева",
-    "KZ94722S000041906224": "Каспи КОКО (Сулейменов)",
-    "KZ78722S000036046839": "Каспи ТОО",
-    "KZ50722S000022286244": "Каспи Имангазиева Дильназ",
-    "KZ508562203134868457": "БЦК ТОО",
-    "KZ97722C000015235365": "Арман каспи голд",
-    "KZ038562204137753855": "БЦК Имангазиева",
-    "KZ448562204152575978": "БЦК Ип Серик",
-    "KZ03601A231012849031": "Народный банк Ип Серик",
-    "KZ438562203234869084": "БЦК Доллары ТОО",
-    "KZ19722RU00001041014": "Депозит Каспи Ип Серик",
-    "KZ31722RD00029080091": "Депозит Каспи кз",
+    "KZ258562203129845083": "БЦК Камкорлык",
+    "KZ53722S000021350043": "Каспи Айс",
+    "KZ18722S000017283463": "Каспи Багдат",
+    "KZ15722C000023657799": "Каспи Голд Айко",
 }
 
 MAIN_CASH_ACCOUNTS = [
-    "Каспи Имангазиева Зухра",
-    "Каспи СЕРИК",
-    "Каспи Орынбаева",
-    "Каспи КОКО (Сулейменов)",
-    "Каспи ТОО",
-    "Каспи Имангазиева Дильназ",
-    "БЦК ТОО",
-    "Арман каспи голд",
-    "Депозит Каспи Ип Серик",
-    "Депозит Каспи кз",
-    "БЦК Доллары ТОО",
-    "Народный банк Ип Серик",
-    "БЦК Ип Серик",
+    "БЦК Камкорлык",
+    "Каспи Айс",
+    "Каспи Багдат",
+    "Каспи Голд Айко",
     "Основная касса (Сейф)",
 ]
 
-EXCLUDED_ACCOUNTS = {
-    "Подотчётные деньги",
-    "ВТБ",
-    "Народный банк Имангазиева",
-    "БЦК Имангазиева",
-    "БЦК Орынбаева",
-    "Депозит Имангазиева",
-}
+EXCLUDED_ACCOUNTS = set()
 
 # ============ GOOGLE SHEETS ============
 
@@ -291,7 +265,6 @@ def get_last_operation_date(реестр_data) -> str:
 
 
 def get_last_operation_datetime(реестр_data) -> datetime:
-    """Возвращает datetime последней операции в реестре."""
     last_date = None
     for row in реестр_data[1:]:
         date_val = str(row[3]).strip() if len(row) > 3 else ""
@@ -469,6 +442,10 @@ ACCOUNT_SYNONYMS = {
     "депозит":     ["депозит", "deposit"],
     "usd":         ["usd", "доллар"],
     "касса":       ["касса", "сейф", "наличные", "cash", "кассa"],
+    "камкорлык":   ["камкорлык"],
+    "айс":         ["айс"],
+    "багдат":      ["багдат"],
+    "айко":        ["айко"],
 }
 
 BANK_CONFLICT_GROUPS = [
@@ -803,7 +780,6 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
 
 
 def get_main_cash_summary():
-    """Текущие остатки по всем счетам (на дату последней операции)."""
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -835,10 +811,7 @@ def get_main_cash_summary():
         ops = ops_by_account[acc]
         current = round(initial + ops, 2)
         total += current
-        lines.append(
-            f"  {acc}: {current:,.0f} тг"
-            f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
-        )
+        lines.append(f"  {acc}: {current:,.0f} тг")
 
     result = f"Остатки по всем счетам на {data_date}:\n"
     result += "\n".join(lines)
@@ -853,27 +826,15 @@ def _last_day_of_month(year: int, month: int) -> datetime:
 
 
 def _resolve_target_date_for_month(month: int, year: int) -> tuple:
-    """
-    Определяет дату среза для запроса остатков на конец месяца.
-
-    Правила:
-    - Если месяц в прошлом → берём последний день месяца (31.03.2026 и т.д.)
-    - Если месяц текущий или будущий → берём дату последней операции в реестре
-      (месяц ещё не закрыт или данных за него нет)
-
-    Возвращает (target_datetime, label_str)
-    """
     now = datetime.now()
     current_year = now.year
     current_month = now.month
 
-    # Если запрошенный год/месяц уже в прошлом — конец того месяца
     if (year < current_year) or (year == current_year and month < current_month):
         target_dt = _last_day_of_month(year, month)
         label = target_dt.strftime("%d.%m.%Y")
         return target_dt, label
 
-    # Иначе (текущий или будущий месяц) — последняя операция в реестре
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
     last_op_dt = get_last_operation_datetime(реестр_data)
@@ -882,10 +843,6 @@ def _resolve_target_date_for_month(month: int, year: int) -> tuple:
 
 
 def get_main_cash_summary_on_date(target_date: datetime):
-    """
-    Остатки по ВСЕМ счетам на указанную дату.
-    Показывает каждый счёт из MAIN_CASH_ACCOUNTS без исключений.
-    """
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -926,10 +883,7 @@ def get_main_cash_summary_on_date(target_date: datetime):
         ops = ops_by_account[acc]
         current = round(initial + ops, 2)
         total += current
-        lines.append(
-            f"  {acc}: {current:,.0f} тг"
-            f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
-        )
+        lines.append(f"  {acc}: {current:,.0f} тг")
 
     result = f"Остатки по всем счетам на {date_label}:\n"
     result += "\n".join(lines)
@@ -1270,9 +1224,6 @@ ALL_ACCOUNTS_KEYWORDS = [
     "итого по всем", "общая сумма",
 ]
 
-# ────────────────────────────────────────────────────────────
-# НОВЫЕ: вопросы вида "остаток на [месяц]" / "какой остаток на [месяц]"
-# ────────────────────────────────────────────────────────────
 BALANCE_ON_MONTH_KEYWORDS = [
     "остаток на",
     "остатки на",
@@ -1399,20 +1350,12 @@ def _is_turnover_intent_question(text: str) -> bool:
 
 
 def _is_balance_on_month_question(text: str) -> bool:
-    """
-    Возвращает True если вопрос про остаток/баланс на конкретный месяц.
-    Например: "остаток на май", "какой остаток на март", "баланс на январь".
-    НЕ срабатывает на вопросы про обороты/расходы.
-    """
     t = text.lower().strip()
-    # Сначала убедимся что в тексте есть месяц
     has_month = _extract_month_from_question(t) is not None
     if not has_month:
         return False
-    # Убедимся что это не вопрос про обороты/расходы
     if _is_turnover_intent_question(t):
         return False
-    # Проверяем ключевые слова остатков с месяцем
     return any(kw in t for kw in BALANCE_ON_MONTH_KEYWORDS)
 
 
@@ -1479,15 +1422,13 @@ def ask_ai(question: str) -> str:
                         ops_count += 1
             dds = round(initial + ops_total, 2)
             return (
-                f"Основная касса (Сейф) на {data_date}: {dds:,.0f} тг\n"
-                f"  Нач. остаток: {initial:,.0f} тг\n"
-                f"  + Обороты ({ops_count} оп.): {ops_total:,.0f} тг"
+                f"Основная касса (Сейф) на {data_date}: {dds:,.0f} тг"
             )
         except Exception as e:
             logger.error(f"seyf balance error: {e}")
             return f"❌ Ошибка при расчёте основной кассы (Сейф): {e}"
 
-    # ── НОВЫЙ БЛОК 3: остаток на конкретный месяц ──────────────────
+    # 3. Остаток на конкретный месяц
     if _is_balance_on_month_question(question):
         month_num = _extract_month_from_question(question)
         if month_num:
@@ -1496,7 +1437,6 @@ def ask_ai(question: str) -> str:
                 year = now.year
                 target_dt, label = _resolve_target_date_for_month(month_num, year)
                 summary_text, _ = get_main_cash_summary_on_date(target_dt)
-                # Если label содержит "(последняя операция)" — заменим заголовок
                 if "последняя операция" in label:
                     summary_text = summary_text.replace(
                         f"Остатки по всем счетам на {target_dt.strftime('%d.%m.%Y')}:",
@@ -1512,7 +1452,6 @@ def ask_ai(question: str) -> str:
     _has_turnover_intent = _is_turnover_intent_question(question)
     _has_money_with_date = _is_all_accounts_question(question) and len(_dates) > 0
 
-    # Если есть намерение оборотов, но нет явных дат — извлекаем месяц
     if _has_turnover_intent and not _dates:
         month_num = _extract_month_from_question(question)
         if month_num:
@@ -1537,7 +1476,7 @@ def ask_ai(question: str) -> str:
             logger.error(f"get_turnover_for_range error: {e}")
             return f"❌ Ошибка при расчёте оборотов: {e}"
 
-    # 5. Сводка по всем счетам (без даты / с месяцем)
+    # 5. Сводка по всем счетам
     if _is_all_accounts_question(question):
         month_filter = _extract_month_from_question(question)
         if month_filter:
@@ -1736,11 +1675,8 @@ def ask_ai(question: str) -> str:
                 "ИСПОЛЬЗУЙ ДЛЯ: "
                 "'сколько потрачено за 21 февраля' (start=end=21.02), "
                 "'расход с 1 по 22 февраля' (start=01.02, end=22.02), "
-                "'сколько потрачено на 21 февраля' (start=01.01.YYYY, end=21.02), "
-                "'сколько ушло денег к концу февраля' (start=01.01.YYYY, end=28.02), "
                 "'обороты за февраль' (start=01.02, end=28.02), "
-                "'сколько потрачено в мае' (start=01.05, end=31.05), "
-                "'сколько денег было потрачено с 1 февраля до 22 февраля'. "
+                "'сколько потрачено в мае' (start=01.05, end=31.05). "
                 "НЕ использовать для вопросов об остатках (балансах) — "
                 "для остатков используй get_all_accounts_summary_on_month."
             ),
@@ -1814,19 +1750,13 @@ def ask_ai(question: str) -> str:
         "16. ВАЖНО для вопросов про расходы/обороты с датами:\n"
         "    'потрачено ЗА 21 февраля' = get_turnover_for_range(start=21.02, end=21.02)\n"
         "    'потрачено С 1 ПО 22 февраля' = get_turnover_for_range(start=01.02, end=22.02)\n"
-        "    'потрачено НА 21 февраля' (до этой даты) = get_turnover_for_range(start=01.01.YYYY, end=21.02)\n"
         "    'обороты за февраль' = get_turnover_for_range(start=01.02, end=28.02)\n"
         "17. Если спрашивают 'покажи по дням', 'ежедневные остатки', 'динамика по дням' — "
         "    используй get_daily_summary_for_period.\n"
         "18. КРИТИЧЕСКИ ВАЖНО — различай расходы и остатки:\n"
-        "    'потрачено в мае', 'расход в мае', 'сколько потрачено в мае', 'обороты в мае' — "
-        "    это get_turnover_for_range(start=01.05.YYYY, end=31.05.YYYY). НЕ остатки!\n"
-        "    'остаток на май', 'какой остаток на май', 'баланс на май' — "
-        "    это get_all_accounts_summary_on_month(month=5). НЕ обороты!\n"
-        "    Ключевые слова расходов: потрачено, расход, израсходовано, ушло, пришло, обороты.\n"
-        "    Ключевые слова остатков: остаток, баланс, на [месяц], за [месяц] (без глагола расхода).\n"
-        "19. ВСЕГДА показывай ВСЕ счета из списка при выводе остатков. "
-        "    Никогда не сокращай список до 'крупнейших' или 'топ-N'.\n"
+        "    'потрачено в мае', 'расход в мае' — get_turnover_for_range. НЕ остатки!\n"
+        "    'остаток на май', 'баланс на май' — get_all_accounts_summary_on_month. НЕ обороты!\n"
+        "19. ВСЕГДА показывай ВСЕ счета из списка при выводе остатков.\n"
     )
 
     messages = [{"role": "user", "content": question}]
@@ -1902,10 +1832,7 @@ def ask_ai(question: str) -> str:
                         result_content = f"Ошибка: {ops_count}"
                     else:
                         result_content = (
-                            f"Остаток по счёту '{acc}' на {date_str}:\n"
-                            f"  Нач. остаток: {initial:,.2f} тг\n"
-                            f"  + Операции ({ops_count} строк): {ops_total:,.2f} тг\n"
-                            f"  = Итого: {balance:,.2f} тг"
+                            f"Остаток по счёту '{acc}' на {date_str}: {balance:,.2f} тг"
                         )
 
                 elif tool_name == "get_all_accounts_summary":
@@ -1919,7 +1846,6 @@ def ask_ai(question: str) -> str:
                     try:
                         target_dt, label = _resolve_target_date_for_month(month, year)
                         summary_text, _ = get_main_cash_summary_on_date(target_dt)
-                        # Подменяем дату в заголовке на понятный label если текущий месяц
                         if "последняя операция" in label:
                             summary_text = summary_text.replace(
                                 f"Остатки по всем счетам на {target_dt.strftime('%d.%m.%Y')}:",
@@ -1950,9 +1876,7 @@ def ask_ai(question: str) -> str:
                                 ops_count += 1
                     dds = round(initial + ops_total, 2)
                     result_content = (
-                        f"Основная касса (Сейф) на {data_date}: {dds:,.2f} тг\n"
-                        f"  Нач. остаток: {initial:,.2f} тг\n"
-                        f"  + Обороты ({ops_count} оп.): {ops_total:,.2f} тг"
+                        f"Основная касса (Сейф) на {data_date}: {dds:,.2f} тг"
                     )
 
                 elif tool_name == "find_operation_by_amount":
@@ -2011,9 +1935,10 @@ def ask_ai(question: str) -> str:
                     )
 
                 elif tool_name == "get_daily_summary_for_period":
-                    start_date = tool_input.get("start_date", "")
-                    end_date = tool_input.get("end_date", "")
-                    result_content = get_daily_summary_for_period(start_date, end_date)
+                    result_content = get_daily_summary_for_period(
+                        tool_input.get("start_date", ""),
+                        tool_input.get("end_date", "")
+                    )
 
                 elif tool_name == "web_search":
                     result_content = _do_web_search(tool_input.get("query", ""))
@@ -2105,7 +2030,7 @@ def _parse_kaspi_text_lines(all_text, account):
 
 def process_kaspi_gold_pdf(file_bytes):
     rows = []
-    account = "Арман каспи голд"
+    account = "Каспи Голд Айко"
     closing_balance = None
     opening_balance = None
 
@@ -2115,8 +2040,7 @@ def process_kaspi_gold_pdf(file_bytes):
         for p in pdf.pages:
             all_text += (p.extract_text() or "") + "\n"
 
-        is_deposit = ("По Депозиту" in first_text or "На Депозите" in first_text
-                      or "KZ19722RU" in first_text)
+        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text
 
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", all_text)
         if not m_iban:
@@ -2124,10 +2048,6 @@ def process_kaspi_gold_pdf(file_bytes):
         if m_iban:
             iban = m_iban.group(1).strip()
             account = IBAN_MAP.get(iban, account)
-        elif "KZ97722C000015235365" in all_text:
-            account = IBAN_MAP.get("KZ97722C000015235365", account)
-        elif "KZ19722RU00001041014" in all_text:
-            account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
 
         if not is_deposit:
             bal_matches = re.findall(
@@ -2193,7 +2113,7 @@ def process_kaspi_gold_pdf(file_bytes):
 
 def process_bcc_pdf(file_bytes):
     rows = []
-    account = "БЦК Ип Серик"
+    account = "БЦК Камкорлык"
     closing_balance = None
     opening_balance = None
 
@@ -2221,7 +2141,7 @@ def process_bcc_pdf(file_bytes):
         m_bal = re.search(
             r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
-            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\д\s]+[,.][\d]+)", full_text)
+            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
             m_bal = re.search(r"[Шш]ығыс сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if m_bal:
@@ -2317,7 +2237,7 @@ def parse_kz_num(s):
 
 def process_halyk_pdf(file_bytes):
     rows = []
-    account = "Народный банк Ип Серик"
+    account = "Народный банк"
     closing_balance = None
     opening_balance = None
 
@@ -2330,11 +2250,11 @@ def process_halyk_pdf(file_bytes):
     if m_iban:
         account = IBAN_MAP.get(m_iban.group(1).strip(), account)
 
-    m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\д\s,]+\.\d{2})", full_text)
+    m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
     if m_open:
         opening_balance = parse_kz_num(m_open.group(1))
 
-    m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\д\s,]+\.\d{2})", full_text)
+    m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
     if m_bal:
         closing_balance = parse_kz_num(m_bal.group(1))
 
@@ -2467,14 +2387,12 @@ def process_xlsx(file_bytes):
 # ============ ОПРЕДЕЛЕНИЕ ТИПА PDF ============
 
 def detect_pdf_type(first_page_text):
-    if ("По Депозиту" in first_page_text or "На Депозите" in first_page_text
-            or "KZ19722RU" in first_page_text):
+    if "По Депозиту" in first_page_text or "На Депозите" in first_page_text:
         return "kaspi_deposit"
     if ("СПРАВКА" in first_page_text
-            and ("Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text
-                 or "CASPKZKA" in first_page_text)):
+            and ("Kaspi Gold" in first_page_text or "CASPKZKA" in first_page_text)):
         return "kaspi_gold"
-    if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
+    if "Kaspi Gold" in first_page_text:
         return "kaspi_gold"
     if "Kaspi Bank" in first_page_text or "CASPKZKA" in first_page_text:
         return "kaspi_gold"
@@ -2483,8 +2401,7 @@ def detect_pdf_type(first_page_text):
         return "halyk"
     if ("ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text
             or "KCJBKZKX" in first_page_text
-            or "KZ44856" in first_page_text or "KZ03856" in first_page_text
-            or "KZ50856" in first_page_text or "KZ43856" in first_page_text):
+            or "KZ25856" in first_page_text):
         return "bcc"
     return "kaspi_gold"
 
@@ -2509,23 +2426,20 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Сколько потрачено в мае?\n"
                 "• Обороты за март по статьям?\n"
                 "• Основная касса (Сейф) — сколько?\n"
-                "• Сколько потрачено за 21 февраля?\n"
-                "• Сколько потрачено на 21 февраля?\n"
-                "• Сколько потрачено с 1 по 22 февраля?\n"
                 "• Покажи обороты по дням за январь\n"
                 "• Какого дня был остаток 685486 тг?\n"
                 "• Какой курс доллара?\n"
                 "• Напиши все счета\n\n"
                 "🔍 Команды:\n"
                 "/rows <счёт> — строки по счёту\n"
-                "Пример: /rows Каспи ТОО"
+                "Пример: /rows Каспи Айс"
             )
             return
 
         if question.startswith("/rows"):
             acc = question[5:].strip()
             if not acc:
-                await update.message.reply_text("Укажи счёт: /rows Каспи ТОО")
+                await update.message.reply_text("Укажи счёт: /rows Каспи Айс")
                 return
             await update.message.reply_text(f"🔍 Ищу строки для «{acc}»...")
             try:
